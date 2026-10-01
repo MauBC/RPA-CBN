@@ -142,3 +142,6 @@ $RECYCLE.BIN/
 ~$*.xlsx
 ~$*.xlsm
 ~$*.xls
+
+# Baselines locales de desarrollo
+CP*_BASELINE.txt
