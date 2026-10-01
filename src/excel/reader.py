@@ -440,3 +440,17 @@ def leer_primera_orden_excel(ruta_excel: str | Path) -> OrdenCotizacion:
         raise ValidacionExcelError("No se encontro ninguna orden valida en el Excel.")
 
     return ordenes[0]
+
+
+def validar_ordenes_cargadas(
+    ordenes: list[OrdenCotizacion],
+) -> None:
+    """
+    Revalida órdenes ya construidas.
+
+    Se usa después de reemplazar rutas de TEMPLATE por snapshots,
+    garantizando que las copias que utilizará el RPA siguen cumpliendo
+    las mismas reglas de negocio.
+    """
+    for orden in ordenes:
+        _validar_posiciones_de_orden(orden)
