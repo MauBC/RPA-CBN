@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 
@@ -101,4 +101,63 @@ def test_helper_de_persistencia_usa_journal():
     assert (
         "raise "
         not in codigo
+    )
+
+
+def test_runner_bloquea_overlay_fallido_antes_de_abrir_navegador():
+    codigo = inspect.getsource(
+        runner.ejecutar_rpa
+    )
+
+    pos_overlay = codigo.index(
+        "aplicar_actualizaciones_pendientes_a_snapshot("
+    )
+
+    pos_bloqueo = codigo.index(
+        'if overlay_pendientes["fallidas"]'
+    )
+
+    pos_browser = codigo.index(
+        "abrir_contexto("
+    )
+
+    assert (
+        pos_overlay
+        < pos_bloqueo
+        < pos_browser
+    )
+
+    assert (
+        "revisi?n manual"
+        in codigo
+    )
+
+    assert (
+        "evitar "
+        in codigo
+    )
+
+    assert (
+        "reprocesar ?rdenes"
+        in codigo
+    )
+
+
+def test_mensaje_fatal_preserva_bloqueo_de_sincronizacion():
+    mensaje = (
+        "Se requiere revisi?n manual para evitar "
+        "reprocesar ?rdenes ya ejecutadas en CBN."
+    )
+
+    error = (
+        runner.SincronizacionExcelRequiereRevisionError(
+            mensaje
+        )
+    )
+
+    assert (
+        runner._mensaje_error_fatal(
+            error
+        )
+        == mensaje
     )

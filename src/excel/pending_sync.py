@@ -408,6 +408,79 @@ def _guardar_journal_sin_lock(
             pass
 
 
+def obtener_estado_journal(
+    ruta_excel: str | Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Lee updates y failed_updates usando un ?nico lock
+    y una ?nica lectura f?sica del journal.
+
+    Se utiliza principalmente para consultas de estado
+    donde necesitamos ambas colecciones simult?neamente.
+    """
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        pendientes = [
+            dict(valor)
+            for valor
+            in journal["updates"].values()
+        ]
+
+        fallidas = [
+            dict(valor)
+            for valor
+            in journal[
+                "failed_updates"
+            ].values()
+        ]
+
+    pendientes = sorted(
+        pendientes,
+        key=lambda item: (
+            str(
+                item.get(
+                    "created_at",
+                    "",
+                )
+            ),
+            str(
+                item.get(
+                    "id_orden",
+                    "",
+                )
+            ),
+        ),
+    )
+
+    fallidas = sorted(
+        fallidas,
+        key=lambda item: (
+            str(
+                item.get(
+                    "sync_failed_at",
+                    "",
+                )
+            ),
+            str(
+                item.get(
+                    "id_orden",
+                    "",
+                )
+            ),
+        ),
+    )
+
+    return {
+        "pendientes": pendientes,
+        "fallidas": fallidas,
+    }
+
+
 def obtener_actualizaciones_pendientes(
     ruta_excel: str | Path,
 ) -> list[dict[str, Any]]:
@@ -845,6 +918,169 @@ def _mover_actualizacion_a_fallidas_si_version(
         return True
 
 
+def registrar_actualizacion_fallida_excel(
+    ruta_excel: str | Path,
+    id_orden: Any,
+    *,
+    estado_rpa: int,
+    resumen: str | None,
+    codigo_error: str,
+    detalle_error: str,
+    tipo_error: str,
+    intentos_realizados: int = 1,
+) -> Path:
+    """
+    Conserva de forma durable un resultado que CBN ya produjo,
+    pero que no puede reflejarse autom?ticamente en Excel.
+
+    La entrada queda fuera del retry autom?tico y obliga a
+    revisi?n manual antes de una nueva ejecuci?n.
+    """
+    if estado_rpa not in (
+        0,
+        1,
+        2,
+    ):
+        raise ValueError(
+            "estado_rpa solo puede ser 0, 1 o 2."
+        )
+
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    if not id_normalizado:
+        raise ValueError(
+            "id_orden no puede estar vac?o."
+        )
+
+    ahora = _ahora_iso()
+
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        activa_anterior = (
+            journal[
+                "updates"
+            ].pop(
+                id_normalizado,
+                None,
+            )
+        )
+
+        fallida_anterior = (
+            journal[
+                "failed_updates"
+            ].get(
+                id_normalizado
+            )
+        )
+
+        anterior = (
+            activa_anterior
+            if isinstance(
+                activa_anterior,
+                dict,
+            )
+            else (
+                fallida_anterior
+                if isinstance(
+                    fallida_anterior,
+                    dict,
+                )
+                else None
+            )
+        )
+
+        created_at = (
+            str(
+                anterior.get(
+                    "created_at",
+                    ahora,
+                )
+            )
+            if anterior is not None
+            else ahora
+        )
+
+        intentos_previos = (
+            int(
+                anterior.get(
+                    "intentos",
+                    0,
+                )
+            )
+            if anterior is not None
+            else 0
+        )
+
+        intentos = (
+            intentos_previos
+            + max(
+                1,
+                int(
+                    intentos_realizados
+                ),
+            )
+        )
+
+        journal[
+            "failed_updates"
+        ][
+            id_normalizado
+        ] = {
+            "id_orden": id_normalizado,
+            "estado_rpa": estado_rpa,
+            "resumen": (
+                None
+                if resumen is None
+                else str(
+                    resumen
+                ).strip()
+            ),
+            "created_at": created_at,
+            "updated_at": ahora,
+            "intentos": intentos,
+            "ultimo_error": str(
+                detalle_error or ""
+            ),
+            "sync_failed_at": ahora,
+            "sync_error_code": str(
+                codigo_error
+            ),
+            "sync_error_detail": str(
+                detalle_error
+            ),
+            "sync_error_type": str(
+                tipo_error
+            ),
+            "sync_recoverable": False,
+        }
+
+        journal["version"] = (
+            VERSION_JOURNAL
+        )
+
+        journal["target_excel"] = str(
+            _ruta_resuelta(
+                ruta_excel
+            )
+        )
+
+        _guardar_journal_sin_lock(
+            ruta_excel,
+            journal,
+        )
+
+    return ruta_journal_excel(
+        ruta_excel
+    )
+
+
 def persistir_o_encolar_resultado(
     ruta_excel: str | Path,
     id_orden: Any,
@@ -927,25 +1163,73 @@ def persistir_o_encolar_resultado(
     # --------------------------------------------------------
 
     if not clasificacion.recuperable:
-        return ResultadoPersistenciaExcel(
-            estado=(
-                EstadoPersistenciaExcel.NO_PERSISTIDO
-            ),
-            id_orden=id_normalizado,
-            detalle=(
-                "La operaci?n del portal ya termin?, "
-                "pero Excel rechaz? la persistencia por "
-                "un error NO recuperable autom?ticamente. "
-                f"[{clasificacion.codigo}] "
-                f"{clasificacion.detalle}"
-            ),
-            ruta_journal=None,
-            intentos=intento.intentos,
-            codigo_error=(
-                clasificacion.codigo
-            ),
-            recuperable=False,
-        )
+        try:
+            journal = (
+                registrar_actualizacion_fallida_excel(
+                    ruta_excel,
+                    id_normalizado,
+                    estado_rpa=estado_rpa,
+                    resumen=resumen,
+                    codigo_error=(
+                        clasificacion.codigo
+                    ),
+                    detalle_error=(
+                        clasificacion.detalle
+                    ),
+                    tipo_error=(
+                        type(
+                            error_excel
+                        ).__name__
+                    ),
+                    intentos_realizados=(
+                        intento.intentos
+                    ),
+                )
+            )
+
+            return ResultadoPersistenciaExcel(
+                estado=(
+                    EstadoPersistenciaExcel.NO_PERSISTIDO
+                ),
+                id_orden=id_normalizado,
+                detalle=(
+                    "La operaci?n del portal ya termin?, "
+                    "pero Excel rechaz? la persistencia por "
+                    "un error NO recuperable autom?ticamente. "
+                    "El resultado qued? protegido en "
+                    "failed_updates y requiere revisi?n manual. "
+                    f"[{clasificacion.codigo}] "
+                    f"{clasificacion.detalle}"
+                ),
+                ruta_journal=journal,
+                intentos=intento.intentos,
+                codigo_error=(
+                    clasificacion.codigo
+                ),
+                recuperable=False,
+            )
+
+        except Exception as error_journal:
+            return ResultadoPersistenciaExcel(
+                estado=(
+                    EstadoPersistenciaExcel.NO_PERSISTIDO
+                ),
+                id_orden=id_normalizado,
+                detalle=(
+                    "La operaci?n del portal ya termin? y "
+                    "Excel rechaz? la persistencia. Adem?s, "
+                    "no fue posible conservar el resultado "
+                    "en failed_updates. "
+                    f"Error Excel: {error_excel}. "
+                    f"Error journal: {error_journal}"
+                ),
+                ruta_journal=None,
+                intentos=intento.intentos,
+                codigo_error=(
+                    clasificacion.codigo
+                ),
+                recuperable=False,
+            )
 
     # --------------------------------------------------------
     # Error transitorio que sobrevivi? a los retries.
@@ -1284,19 +1568,27 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
     ruta_excel_original: str | Path,
 ) -> dict[str, Any]:
     """
-    Aplica el journal SOLO sobre el snapshot de ejecución.
+    Aplica el journal SOLO sobre el snapshot de ejecuci?n.
 
-    Esto es fundamental si DATA.xlsx sigue abierto:
-    el snapshot podría contener ESTADO_RPA=0 aunque CBN ya
-    haya procesado la orden en una ejecución anterior.
+    Un failed_update representa una operaci?n que CBN ya pudo
+    haber ejecutado, pero cuyo estado no puede reconciliarse
+    autom?ticamente con Excel.
 
-    El journal NO se elimina aquí porque aún no se ha
-    sincronizado con el Excel original.
+    En ese caso NO se intenta continuar: el runner debe detener
+    la ejecuci?n antes de abrir CBN para evitar reprocesamiento.
     """
-    pendientes = (
-        obtener_actualizaciones_pendientes(
-            ruta_excel_original
-        )
+    estado_journal = obtener_estado_journal(
+        ruta_excel_original
+    )
+
+    pendientes = estado_journal[
+        "pendientes"
+    ]
+
+    fallidas_persistentes = (
+        estado_journal[
+            "fallidas"
+        ]
     )
 
     resultado = {
@@ -1304,9 +1596,42 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
             pendientes
         ),
         "aplicadas": 0,
-        "fallidas": 0,
+        "fallidas": len(
+            fallidas_persistentes
+        ),
+        "bloqueadas": len(
+            fallidas_persistentes
+        ),
         "detalles": [],
     }
+
+    if fallidas_persistentes:
+        for actualizacion in (
+            fallidas_persistentes
+        ):
+            resultado[
+                "detalles"
+            ].append(
+                {
+                    "id_orden": str(
+                        actualizacion.get(
+                            "id_orden",
+                            "",
+                        )
+                    ),
+                    "estado": (
+                        "FAILED_UPDATE_REQUIERE_REVISION"
+                    ),
+                    "detalle": str(
+                        actualizacion.get(
+                            "sync_error_detail",
+                            "",
+                        )
+                    ),
+                }
+            )
+
+        return resultado
 
     if not pendientes:
         return resultado

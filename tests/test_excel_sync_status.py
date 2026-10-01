@@ -47,19 +47,17 @@ def _configurar(
     )
 
     monkeypatch.setattr(
-        "src.excel.sync_status.obtener_actualizaciones_pendientes",
-        lambda _: [
-            {"id_orden": str(i)}
-            for i in range(pendientes)
-        ],
-    )
-
-    monkeypatch.setattr(
-        "src.excel.sync_status.obtener_actualizaciones_fallidas",
-        lambda _: [
-            {"id_orden": str(i)}
-            for i in range(fallidas)
-        ],
+        "src.excel.sync_status.obtener_estado_journal",
+        lambda _: {
+            "pendientes": [
+                {"id_orden": str(i)}
+                for i in range(pendientes)
+            ],
+            "fallidas": [
+                {"id_orden": str(i)}
+                for i in range(fallidas)
+            ],
+        },
     )
 
     return ruta
@@ -247,7 +245,7 @@ def test_error_leyendo_journal_no_se_oculta(
         )
 
     monkeypatch.setattr(
-        "src.excel.sync_status.obtener_actualizaciones_pendientes",
+        "src.excel.sync_status.obtener_estado_journal",
         fallar,
     )
 

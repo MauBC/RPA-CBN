@@ -9,8 +9,7 @@ from src.excel.file_access import (
     diagnosticar_acceso_excel,
 )
 from src.excel.pending_sync import (
-    obtener_actualizaciones_fallidas,
-    obtener_actualizaciones_pendientes,
+    obtener_estado_journal,
 )
 
 
@@ -115,16 +114,22 @@ def obtener_estado_sincronizacion_excel(
         )
 
     try:
-        pendientes = len(
-            obtener_actualizaciones_pendientes(
+        estado_journal = (
+            obtener_estado_journal(
                 ruta
             )
         )
 
+        pendientes = len(
+            estado_journal[
+                "pendientes"
+            ]
+        )
+
         fallidas = len(
-            obtener_actualizaciones_fallidas(
-                ruta
-            )
+            estado_journal[
+                "fallidas"
+            ]
         )
 
     except Exception as error:

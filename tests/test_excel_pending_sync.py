@@ -470,7 +470,49 @@ def test_persistir_error_logico_no_se_encola(
     assert resultado.intentos == 1
     assert llamadas["total"] == 1
 
-    assert not ruta_journal_excel(
+    # No entra en la cola recuperable, pero debe quedar
+    # preservado para evitar reprocesamiento futuro.
+    assert (
+        obtener_actualizaciones_pendientes(
+            excel
+        )
+        == []
+    )
+
+    fallidas = (
+        obtener_actualizaciones_fallidas(
+            excel
+        )
+    )
+
+    assert len(fallidas) == 1
+
+    assert (
+        fallidas[0]["id_orden"]
+        == "999"
+    )
+
+    assert (
+        fallidas[0]["estado_rpa"]
+        == 1
+    )
+
+    assert (
+        fallidas[0]["resumen"]
+        == "NO DEBE ENCOLARSE"
+    )
+
+    assert (
+        fallidas[0]["sync_error_code"]
+        == "DATOS_EXCEL_INVALIDOS"
+    )
+
+    assert (
+        fallidas[0]["sync_recoverable"]
+        is False
+    )
+
+    assert ruta_journal_excel(
         excel
     ).exists()
 
@@ -860,3 +902,163 @@ def test_persistencia_inicial_registra_retries_en_journal(
         pendientes[0]["intentos"]
         == 3
     )
+
+
+def test_obtener_estado_journal_devuelve_ambas_colecciones(
+    tmp_path,
+    monkeypatch,
+):
+    from src.excel.pending_sync import (
+        encolar_actualizacion_excel,
+        obtener_estado_journal,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    encolar_actualizacion_excel(
+        excel,
+        "1001",
+        estado_rpa=1,
+        resumen="PENDIENTE",
+    )
+
+    resultado = obtener_estado_journal(
+        excel
+    )
+
+    assert len(
+        resultado["pendientes"]
+    ) == 1
+
+    assert (
+        resultado["pendientes"][0]["id_orden"]
+        == "1001"
+    )
+
+    assert resultado["fallidas"] == []
+
+
+def test_obtener_estado_journal_lee_journal_una_sola_vez(
+    tmp_path,
+    monkeypatch,
+):
+    import src.excel.pending_sync as pending_sync
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    encolar_actualizacion_excel(
+        excel,
+        "1001",
+        estado_rpa=1,
+        resumen="PENDIENTE",
+    )
+
+    original = (
+        pending_sync._leer_journal_sin_lock
+    )
+
+    llamadas = {
+        "total": 0,
+    }
+
+    def contar(ruta):
+        llamadas["total"] += 1
+        return original(ruta)
+
+    monkeypatch.setattr(
+        pending_sync,
+        "_leer_journal_sin_lock",
+        contar,
+    )
+
+    resultado = (
+        pending_sync.obtener_estado_journal(
+            excel
+        )
+    )
+
+    assert llamadas["total"] == 1
+    assert len(
+        resultado["pendientes"]
+    ) == 1
+
+
+def test_overlay_bloquea_failed_update_para_evitar_reprocesamiento(
+    tmp_path,
+    monkeypatch,
+):
+    from src.excel.pending_sync import (
+        registrar_actualizacion_fallida_excel,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    original = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    snapshot = (
+        tmp_path
+        / "entrada_original.xlsx"
+    )
+
+    snapshot.write_bytes(
+        original.read_bytes()
+    )
+
+    registrar_actualizacion_fallida_excel(
+        original,
+        "1001",
+        estado_rpa=1,
+        resumen="PORTAL YA FINALIZADO",
+        codigo_error="DATOS_EXCEL_INVALIDOS",
+        detalle_error="Prueba de bloqueo",
+        tipo_error="ValueError",
+        intentos_realizados=1,
+    )
+
+    resultado = (
+        aplicar_actualizaciones_pendientes_a_snapshot(
+            snapshot,
+            original,
+        )
+    )
+
+    assert resultado["aplicadas"] == 0
+    assert resultado["fallidas"] == 1
+    assert resultado["bloqueadas"] == 1
+
+    assert (
+        resultado["detalles"][0]["id_orden"]
+        == "1001"
+    )
+
+    assert (
+        resultado["detalles"][0]["estado"]
+        == "FAILED_UPDATE_REQUIERE_REVISION"
+    )
+
+    # No alteramos artificialmente el snapshot.
+    fila_snapshot = _leer_fila(
+        snapshot,
+        "1001",
+    )
+
+    assert fila_snapshot["estado"] == 0
