@@ -137,3 +137,65 @@ def test_obtener_fila_excel_por_id(tmp_path):
     )
 
     assert fila == 4
+
+
+def test_obtener_fila_libera_excel_despues_de_lectura(tmp_path):
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+            ("1002", 0),
+        ],
+    )
+
+    fila = obtener_fila_excel_por_id(
+        ruta,
+        "1002",
+    )
+
+    assert fila == 3
+
+    destino = tmp_path / "DATA_RENAMED.xlsx"
+    ruta.rename(destino)
+
+    assert destino.exists()
+
+
+def test_obtener_pendientes_libera_excel_despues_de_lectura(tmp_path):
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+            ("1001", 0),
+            ("1002", 1),
+        ],
+    )
+
+    pendientes = obtener_pendientes(ruta)
+
+    assert [p.id_orden for p in pendientes] == ["1001"]
+
+    destino = tmp_path / "DATA_RENAMED.xlsx"
+    ruta.rename(destino)
+
+    assert destino.exists()
+
+
+def test_actualizar_estado_libera_excel_despues_de_guardar(tmp_path):
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+        ],
+    )
+
+    actualizar_estado_orden(
+        ruta,
+        "1001",
+        1,
+    )
+
+    destino = tmp_path / "DATA_RENAMED.xlsx"
+    ruta.rename(destino)
+
+    assert destino.exists()

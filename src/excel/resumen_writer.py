@@ -121,33 +121,48 @@ def actualizar_resumen_orden(
     with _excel_lock(ruta_excel):
         wb = load_workbook(ruta_excel)
 
-        if HOJA_ORDENES not in wb.sheetnames:
-            raise ValueError(f"No existe la hoja '{HOJA_ORDENES}'.")
+        try:
+            if HOJA_ORDENES not in wb.sheetnames:
+                raise ValueError(
+                    f"No existe la hoja '{HOJA_ORDENES}'."
+                )
 
-        ws = wb[HOJA_ORDENES]
-        headers = _headers_ws(ws)
+            ws = wb[HOJA_ORDENES]
+            headers = _headers_ws(ws)
 
-        if COL_ID_ORDEN not in headers:
-            raise ValueError(f"No existe la columna '{COL_ID_ORDEN}'.")
+            if COL_ID_ORDEN not in headers:
+                raise ValueError(
+                    f"No existe la columna '{COL_ID_ORDEN}'."
+                )
 
-        col_id = headers[COL_ID_ORDEN]
-        col_resumen = _asegurar_columna_resumen(ws)
+            col_id = headers[COL_ID_ORDEN]
+            col_resumen = _asegurar_columna_resumen(ws)
 
-        filas_actualizadas = 0
+            filas_actualizadas = 0
 
-        for fila in range(2, ws.max_row + 1):
-            id_orden = _normalizar_id(ws.cell(row=fila, column=col_id).value)
+            for fila in range(2, ws.max_row + 1):
+                id_orden = _normalizar_id(
+                    ws.cell(row=fila, column=col_id).value
+                )
 
-            if id_orden == id_orden_buscado:
-                ws.cell(row=fila, column=col_resumen).value = texto_resumen
-                filas_actualizadas += 1
+                if id_orden == id_orden_buscado:
+                    ws.cell(
+                        row=fila,
+                        column=col_resumen,
+                    ).value = texto_resumen
 
-        if filas_actualizadas == 0:
-            raise ValueError(
-                f"No se encontró ID_ORDEN={id_orden_buscado} para actualizar RESUMEN."
-            )
+                    filas_actualizadas += 1
 
-        wb.save(ruta_excel)
+            if filas_actualizadas == 0:
+                raise ValueError(
+                    f"No se encontr? ID_ORDEN={id_orden_buscado} "
+                    f"para actualizar RESUMEN."
+                )
+
+            wb.save(ruta_excel)
+
+        finally:
+            wb.close()
 
     print(
         f"RESUMEN aplicado a {filas_actualizadas} fila(s) "

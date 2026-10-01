@@ -81,3 +81,23 @@ def test_template_normal_no_es_porcentaje(tmp_path):
     )
 
     assert _template_es_porcentaje(ruta) is False
+
+
+def test_template_libera_archivo_despues_de_lectura(tmp_path):
+    ruta = crear_template(
+        tmp_path / "template.xlsx",
+        [
+            ("100010", 100),
+        ],
+    )
+
+    filas = _leer_filas_template(ruta)
+
+    assert filas
+
+    # El archivo debe quedar liberado después de la lectura.
+    ruta_renombrada = tmp_path / "template_renombrado.xlsx"
+
+    ruta.rename(ruta_renombrada)
+
+    assert ruta_renombrada.exists()

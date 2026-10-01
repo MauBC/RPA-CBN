@@ -145,3 +145,6 @@ $RECYCLE.BIN/
 
 # Baselines locales de desarrollo
 CP*_BASELINE.txt
+
+# Backups locales de checkpoints
+_backup_*/

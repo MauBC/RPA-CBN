@@ -230,60 +230,67 @@ def _leer_filas_template(ruta_template: Path) -> list[tuple[str, Decimal]]:
     except Exception as exc:
         raise ValidacionExcelError(f"No se pudo abrir TEMPLATE: {ruta_template}") from exc
 
-    if len(wb.sheetnames) != 1:
-        raise ValidacionExcelError(
-            f"TEMPLATE debe tener exactamente 1 hoja. Archivo: {ruta_template}"
-        )
-
-    ws = wb[wb.sheetnames[0]]
-
-    header_a = str(ws["A1"].value or "").strip()
-    header_b = str(ws["B1"].value or "").strip()
-
-    if header_a != "code" or header_b != "quantityOrPercent":
-        raise ValidacionExcelError(
-            f"TEMPLATE invalido: no modifiques cabeceras. "
-            f"Se esperaba A1='code' y B1='quantityOrPercent'. Archivo: {ruta_template}"
-        )
-
-    filas: list[tuple[str, Decimal]] = []
-    vistos: set[str] = set()
-
-    for row in range(3, ws.max_row + 1):
-        codigo_raw = ws.cell(row=row, column=1).value
-        valor_raw = ws.cell(row=row, column=2).value
-
-        if _es_vacio(codigo_raw) and _es_vacio(valor_raw):
-            continue
-
-        if _es_vacio(codigo_raw):
+    try:
+        if len(wb.sheetnames) != 1:
             raise ValidacionExcelError(
-                f"TEMPLATE {ruta_template}, fila {row}: codigo vacio con valor."
+                f"TEMPLATE debe tener exactamente 1 hoja. Archivo: {ruta_template}"
             )
 
-        if _es_vacio(valor_raw):
+        ws = wb[wb.sheetnames[0]]
+
+        header_a = str(ws["A1"].value or "").strip()
+        header_b = str(ws["B1"].value or "").strip()
+
+        if header_a != "code" or header_b != "quantityOrPercent":
             raise ValidacionExcelError(
-                f"TEMPLATE {ruta_template}, fila {row}: valor vacio para codigo {codigo_raw}."
+                f"TEMPLATE invalido: no modifiques cabeceras. "
+                f"Se esperaba A1='code' y B1='quantityOrPercent'. Archivo: {ruta_template}"
             )
 
-        codigo = _normalizar_codigo(codigo_raw)
-        valor = _to_decimal(valor_raw, f"TEMPLATE {ruta_template}, fila {row}")
+        filas: list[tuple[str, Decimal]] = []
+        vistos: set[str] = set()
 
-        if codigo in vistos:
-            raise ValidacionExcelError(
-                f"TEMPLATE {ruta_template}: codigo duplicado '{codigo}'."
+        for row in range(3, ws.max_row + 1):
+            codigo_raw = ws.cell(row=row, column=1).value
+            valor_raw = ws.cell(row=row, column=2).value
+
+            if _es_vacio(codigo_raw) and _es_vacio(valor_raw):
+                continue
+
+            if _es_vacio(codigo_raw):
+                raise ValidacionExcelError(
+                    f"TEMPLATE {ruta_template}, fila {row}: codigo vacio con valor."
+                )
+
+            if _es_vacio(valor_raw):
+                raise ValidacionExcelError(
+                    f"TEMPLATE {ruta_template}, fila {row}: "
+                    f"valor vacio para codigo {codigo_raw}."
+                )
+
+            codigo = _normalizar_codigo(codigo_raw)
+            valor = _to_decimal(
+                valor_raw,
+                f"TEMPLATE {ruta_template}, fila {row}",
             )
 
-        vistos.add(codigo)
-        filas.append((codigo, valor))
+            if codigo in vistos:
+                raise ValidacionExcelError(
+                    f"TEMPLATE {ruta_template}: codigo duplicado '{codigo}'."
+                )
 
-    if not filas:
-        raise ValidacionExcelError(f"TEMPLATE no tiene filas de datos: {ruta_template}")
+            vistos.add(codigo)
+            filas.append((codigo, valor))
 
-    return filas
+        if not filas:
+            raise ValidacionExcelError(
+                f"TEMPLATE no tiene filas de datos: {ruta_template}"
+            )
 
+        return filas
 
-
+    finally:
+        wb.close()
 
 def _template_es_porcentaje(ruta_template: Path) -> bool:
     """
