@@ -242,7 +242,7 @@ def _asegurar_columna_resumen(ws) -> int:
 
 def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
     """
-    ID_ORDEN repetidos est?n permitidos porque representan posiciones.
+    ID_ORDEN repetidos están permitidos porque representan posiciones.
 
     Todas las filas del mismo ID_ORDEN deben tener el mismo ESTADO_RPA.
     """
@@ -324,7 +324,7 @@ def inspeccionar_pendientes(
     ruta_excel: str | Path,
 ) -> list[PendienteRPA]:
     """
-    Inspecciona las ?rdenes pendientes SIN modificar el Excel original.
+    Inspecciona las órdenes pendientes SIN modificar el Excel original.
 
     Reglas:
     - Si ESTADO_RPA no existe, se considera estado 0 en memoria.
@@ -380,8 +380,8 @@ def inspeccionar_pendientes(
                 continue
 
             if col_estado is None:
-                # ESTADO_RPA todav?a no existe.
-                # Durante VALIDACI?N lo simulamos como pendiente,
+                # ESTADO_RPA todavía no existe.
+                # Durante VALIDACIÓN lo simulamos como pendiente,
                 # sin modificar el workbook original.
                 estado = 0
             else:
@@ -524,7 +524,7 @@ def actualizar_resultado_orden(
     resumen: str | None = None,
 ) -> int:
     """
-    Actualiza en una ?nica apertura/guardado los campos controlados
+    Actualiza en una única apertura/guardado los campos controlados
     por el RPA para todas las filas de un ID_ORDEN.
 
     - ESTADO_RPA siempre se actualiza.
@@ -546,7 +546,7 @@ def actualizar_resultado_orden(
 
     if not id_orden_buscado:
         raise ValueError(
-            "id_orden_buscado no puede estar vac?o."
+            "id_orden_buscado no puede estar vacío."
         )
 
     texto_resumen = (
@@ -620,12 +620,12 @@ def actualizar_resultado_orden(
 
             if filas_actualizadas == 0:
                 raise ValueError(
-                    f"No se encontr? "
+                    f"No se encontró "
                     f"ID_ORDEN={id_orden_buscado} "
                     f"para actualizar resultado."
                 )
 
-            # ?NICO save de la operaci?n.
+            # ÚNICO save de la operación.
             guardar_workbook_atomico(wb, ruta_excel)
 
         finally:
@@ -695,7 +695,7 @@ def actualizar_estado_orden(
 
             if filas_actualizadas == 0:
                 raise ValueError(
-                    f"No se encontr? ID_ORDEN={id_orden_buscado} "
+                    f"No se encontró ID_ORDEN={id_orden_buscado} "
                     f"para actualizar ESTADO_RPA."
                 )
 

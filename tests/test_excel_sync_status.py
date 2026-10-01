@@ -36,7 +36,7 @@ def _configurar(
             estado=estado_acceso,
             puede_escribir=puede_escribir,
             lock_office_detectado=False,
-            detalle="diagn?stico test",
+            detalle="diagnóstico test",
             winerror=winerror,
         )
     )
@@ -221,7 +221,7 @@ def test_failed_updates_tienen_prioridad_visual(
     assert resultado.pendientes == 2
 
     assert (
-        "1 actualizaci?n requiere revisi?n"
+        "1 actualización requiere revisión"
         in resultado.mensaje
     )
 

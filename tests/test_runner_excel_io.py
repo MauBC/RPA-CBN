@@ -151,7 +151,7 @@ def test_ejecutar_rpa_usa_cache_de_filas():
         in codigo
     )
 
-    # La b?squeda hist?rica queda solo como fallback en
+    # La búsqueda histórica queda solo como fallback en
     # _resolver_fila_excel_resultado, no en el loop principal.
     assert (
         "obtener_fila_excel_por_id(ruta_excel, orden.id_orden)"

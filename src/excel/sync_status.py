@@ -68,14 +68,14 @@ def obtener_estado_sincronizacion_excel(
     ruta_excel: str | Path,
 ) -> ResumenSincronizacionExcel:
     """
-    Resume el estado t?cnico de Excel en un contrato simple
-    pensado para la interfaz gr?fica.
+    Resume el estado técnico de Excel en un contrato simple
+    pensado para la interfaz gráfica.
 
     No modifica el workbook ni intenta sincronizarlo.
 
     Prioridad visual:
     1. Archivo inexistente / error de acceso.
-    2. Operaciones que requieren revisi?n manual.
+    2. Operaciones que requieren revisión manual.
     3. Operaciones pendientes.
     4. Excel abierto sin pendientes.
     5. Todo sincronizado.
@@ -140,7 +140,7 @@ def obtener_estado_sincronizacion_excel(
             ),
             mensaje=(
                 "No se pudo leer el estado "
-                "de sincronizaci?n."
+                "de sincronización."
             ),
             pendientes=0,
             fallidas=0,
@@ -203,14 +203,14 @@ def obtener_estado_sincronizacion_excel(
             detalle=diagnostico.detalle,
         )
 
-    # Una operaci?n aislada requiere atenci?n aunque adem?s
+    # Una operación aislada requiere atención aunque además
     # existan cambios recuperables pendientes.
     if fallidas:
         partes = [
             _texto_cantidad(
                 fallidas,
-                "actualizaci?n requiere revisi?n",
-                "actualizaciones requieren revisi?n",
+                "actualización requiere revisión",
+                "actualizaciones requieren revisión",
             )
         ]
 
@@ -233,7 +233,7 @@ def obtener_estado_sincronizacion_excel(
             estado=(
                 EstadoSincronizacionExcel.REQUIERE_REVISION
             ),
-            mensaje=" ? ".join(partes),
+            mensaje=" · ".join(partes),
             pendientes=pendientes,
             fallidas=fallidas,
             puede_escribir=(
@@ -253,7 +253,7 @@ def obtener_estado_sincronizacion_excel(
 
         if diagnostico.ocupado:
             mensaje = (
-                f"Excel abierto ? {cantidad}"
+                f"Excel abierto · {cantidad}"
             )
 
             estado = (
@@ -262,7 +262,7 @@ def obtener_estado_sincronizacion_excel(
 
         else:
             mensaje = (
-                f"{cantidad} ? "
+                f"{cantidad} · "
                 "Excel disponible para sincronizar"
             )
 
@@ -291,7 +291,7 @@ def obtener_estado_sincronizacion_excel(
                 EstadoSincronizacionExcel.EXCEL_OCUPADO
             ),
             mensaje=(
-                "Excel abierto ? "
+                "Excel abierto · "
                 "Sin cambios pendientes"
             ),
             pendientes=0,
@@ -308,7 +308,7 @@ def obtener_estado_sincronizacion_excel(
             EstadoSincronizacionExcel.SINCRONIZADO
         ),
         mensaje=(
-            "Excel listo ? "
+            "Excel listo · "
             "Sin cambios pendientes"
         ),
         pendientes=0,

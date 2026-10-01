@@ -128,7 +128,7 @@ def test_runner_bloquea_overlay_fallido_antes_de_abrir_navegador():
     )
 
     assert (
-        "revisi?n manual"
+        "revisión manual"
         in codigo
     )
 
@@ -138,14 +138,14 @@ def test_runner_bloquea_overlay_fallido_antes_de_abrir_navegador():
     )
 
     assert (
-        "reprocesar ?rdenes"
+        "reprocesar órdenes"
         in codigo
     )
 
 
 def test_mensaje_fatal_preserva_bloqueo_de_sincronizacion():
     mensaje = (
-        "Se requiere revisi?n manual para evitar "
+        "Se requiere revisión manual para evitar "
         "reprocesar ?rdenes ya ejecutadas en CBN."
     )
 

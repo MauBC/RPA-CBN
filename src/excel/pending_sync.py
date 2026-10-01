@@ -285,7 +285,7 @@ def _leer_journal_sin_lock(
 
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            f"Journal Excel inv?lido: "
+            f"Journal Excel inválido: "
             f"{ruta_journal}"
         ) from exc
 
@@ -294,7 +294,7 @@ def _leer_journal_sin_lock(
         dict,
     ):
         raise RuntimeError(
-            f"Formato inv?lido de journal: "
+            f"Formato inválido de journal: "
             f"{ruta_journal}"
         )
 
@@ -322,7 +322,7 @@ def _leer_journal_sin_lock(
         dict,
     ):
         raise RuntimeError(
-            f"Journal con 'failed_updates' inv?lido: "
+            f"Journal con 'failed_updates' inválido: "
             f"{ruta_journal}"
         )
 
@@ -412,11 +412,11 @@ def obtener_estado_journal(
     ruta_excel: str | Path,
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Lee updates y failed_updates usando un ?nico lock
-    y una ?nica lectura f?sica del journal.
+    Lee updates y failed_updates usando un único lock
+    y una única lectura física del journal.
 
     Se utiliza principalmente para consultas de estado
-    donde necesitamos ambas colecciones simult?neamente.
+    donde necesitamos ambas colecciones simultáneamente.
     """
     with _journal_lock(
         ruta_excel
@@ -521,7 +521,7 @@ def obtener_actualizaciones_fallidas(
 ) -> list[dict[str, Any]]:
     """
     Devuelve operaciones preservadas como evidencia,
-    pero excluidas del retry autom?tico.
+    pero excluidas del retry automático.
     """
     with _journal_lock(
         ruta_excel
@@ -592,7 +592,7 @@ def encolar_actualizacion_excel(
 
     if not id_normalizado:
         raise ValueError(
-            "id_orden no puede estar vac?o."
+            "id_orden no puede estar vacío."
         )
 
     ahora = _ahora_iso()
@@ -653,8 +653,8 @@ def encolar_actualizacion_excel(
             ),
         }
 
-        # Una actualizaci?n nueva/reactualizada revive
-        # el ID aunque una versi?n anterior hubiese sido
+        # Una actualización nueva/reactualizada revive
+        # el ID aunque una versión anterior hubiese sido
         # aislada como no recuperable.
         journal[
             "failed_updates"
@@ -808,7 +808,7 @@ def _registrar_intento_fallido(
             )
 
     except Exception:
-        # El error original de sincronizaci?n es m?s importante
+        # El error original de sincronización es más importante
         # que un fallo secundario actualizando metadata.
         pass
 
@@ -824,7 +824,7 @@ def _mover_actualizacion_a_fallidas_si_version(
     intentos_realizados: int,
 ) -> bool:
     """
-    Mueve una actualizaci?n fuera de la cola autom?tica sin
+    Mueve una actualización fuera de la cola automática sin
     perder su contenido ni la evidencia del error.
     """
     with _journal_lock(
@@ -931,10 +931,10 @@ def registrar_actualizacion_fallida_excel(
 ) -> Path:
     """
     Conserva de forma durable un resultado que CBN ya produjo,
-    pero que no puede reflejarse autom?ticamente en Excel.
+    pero que no puede reflejarse automáticamente en Excel.
 
-    La entrada queda fuera del retry autom?tico y obliga a
-    revisi?n manual antes de una nueva ejecuci?n.
+    La entrada queda fuera del retry automático y obliga a
+    revisión manual antes de una nueva ejecución.
     """
     if estado_rpa not in (
         0,
@@ -951,7 +951,7 @@ def registrar_actualizacion_fallida_excel(
 
     if not id_normalizado:
         raise ValueError(
-            "id_orden no puede estar vac?o."
+            "id_orden no puede estar vacío."
         )
 
     ahora = _ahora_iso()
@@ -1091,11 +1091,11 @@ def persistir_o_encolar_resultado(
     """
     Intenta persistir inmediatamente en DATA.xlsx.
 
-    Pol?tica CP8:
+    Política CP8:
     - errores recuperables se reintentan brevemente;
     - si persisten, se guardan en journal;
-    - errores l?gicos/estructurales NO se encolan;
-    - ning?n error de persistencia cambia el resultado
+    - errores lógicos/estructurales no entran al retry automático; se aíslan en failed_updates;
+    - ningún error de persistencia cambia el resultado
       ya obtenido en el portal.
     """
     id_normalizado = _normalizar_id(
@@ -1147,7 +1147,7 @@ def persistir_o_encolar_resultado(
             ),
             id_orden=id_normalizado,
             detalle=(
-                "Fall? la persistencia y no fue posible "
+                "Falló la persistencia y no fue posible "
                 "clasificar el error."
             ),
             ruta_journal=None,
@@ -1159,7 +1159,7 @@ def persistir_o_encolar_resultado(
         )
 
     # --------------------------------------------------------
-    # Error l?gico/estructural: NO contaminar el journal.
+    # Error lógico/estructural: preservar en failed_updates sin incorporarlo al retry automático.
     # --------------------------------------------------------
 
     if not clasificacion.recuperable:
@@ -1193,11 +1193,11 @@ def persistir_o_encolar_resultado(
                 ),
                 id_orden=id_normalizado,
                 detalle=(
-                    "La operaci?n del portal ya termin?, "
-                    "pero Excel rechaz? la persistencia por "
-                    "un error NO recuperable autom?ticamente. "
-                    "El resultado qued? protegido en "
-                    "failed_updates y requiere revisi?n manual. "
+                    "La operación del portal ya terminó, "
+                    "pero Excel rechazó la persistencia por "
+                    "un error NO recuperable automáticamente. "
+                    "El resultado quedó protegido en "
+                    "failed_updates y requiere revisión manual. "
                     f"[{clasificacion.codigo}] "
                     f"{clasificacion.detalle}"
                 ),
@@ -1216,8 +1216,8 @@ def persistir_o_encolar_resultado(
                 ),
                 id_orden=id_normalizado,
                 detalle=(
-                    "La operaci?n del portal ya termin? y "
-                    "Excel rechaz? la persistencia. Adem?s, "
+                    "La operación del portal ya terminó y "
+                    "Excel rechazó la persistencia. Además, "
                     "no fue posible conservar el resultado "
                     "en failed_updates. "
                     f"Error Excel: {error_excel}. "
@@ -1232,7 +1232,7 @@ def persistir_o_encolar_resultado(
             )
 
     # --------------------------------------------------------
-    # Error transitorio que sobrevivi? a los retries.
+    # Error transitorio que sobrevivió a los retries.
     # Journal persistente.
     # --------------------------------------------------------
 
@@ -1257,10 +1257,10 @@ def persistir_o_encolar_resultado(
             ),
             id_orden=id_normalizado,
             detalle=(
-                "No se pudo actualizar el Excel despu?s "
+                "No se pudo actualizar el Excel después "
                 f"de {intento.intentos} intento(s). "
                 "El error es recuperable y el resultado "
-                "qued? guardado en la cola persistente. "
+                "quedó guardado en la cola persistente. "
                 f"[{clasificacion.codigo}] "
                 f"{clasificacion.detalle}"
             ),
@@ -1279,7 +1279,7 @@ def persistir_o_encolar_resultado(
             ),
             id_orden=id_normalizado,
             detalle=(
-                "La operaci?n del portal ya termin?, "
+                "La operación del portal ya terminó, "
                 "pero no fue posible actualizar Excel "
                 "ni guardar el journal. "
                 f"Error Excel: {error_excel}. "
@@ -1298,15 +1298,15 @@ def sincronizar_actualizaciones_pendientes(
     ruta_excel: str | Path,
 ) -> dict[str, Any]:
     """
-    Intenta aplicar la cola sobre la versi?n ACTUAL del Excel.
+    Intenta aplicar la cola sobre la versión ACTUAL del Excel.
 
     CP8:
     - bloqueo temporal -> retry corto y permanece pendiente;
-    - error l?gico -> se mueve a failed_updates;
-    - un bloqueo global del archivo evita intentar in?tilmente
+    - error lógico -> se mueve a failed_updates;
+    - un bloqueo global del archivo evita intentar inútilmente
       todas las entradas restantes;
     - una entrada aislada no vuelve a reintentarse
-      autom?ticamente.
+      automáticamente.
     """
     pendientes = (
         obtener_actualizaciones_pendientes(
@@ -1405,8 +1405,8 @@ def sincronizar_actualizaciones_pendientes(
         error = (
             intento.error
             or RuntimeError(
-                "Error de sincronizaci?n "
-                "sin excepci?n disponible."
+                "Error de sincronización "
+                "sin excepción disponible."
             )
         )
 
@@ -1463,7 +1463,7 @@ def sincronizar_actualizaciones_pendientes(
                 }
             )
 
-            # Un bloqueo a nivel de archivo afectar? a todas
+            # Un bloqueo a nivel de archivo afectará a todas
             # las operaciones. No tiene sentido esperar tres
             # veces por cada ID.
             if (
@@ -1491,9 +1491,9 @@ def sincronizar_actualizaciones_pendientes(
                                 clasificacion.codigo
                             ),
                             "detalle": (
-                                "No se intent? porque "
+                                "No se intentó porque "
                                 "el archivo completo "
-                                "contin?a bloqueado."
+                                "continúa bloqueado."
                             ),
                             "intentos": 0,
                         }
@@ -1568,14 +1568,14 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
     ruta_excel_original: str | Path,
 ) -> dict[str, Any]:
     """
-    Aplica el journal SOLO sobre el snapshot de ejecuci?n.
+    Aplica el journal SOLO sobre el snapshot de ejecución.
 
-    Un failed_update representa una operaci?n que CBN ya pudo
+    Un failed_update representa una operación que CBN ya pudo
     haber ejecutado, pero cuyo estado no puede reconciliarse
-    autom?ticamente con Excel.
+    automáticamente con Excel.
 
     En ese caso NO se intenta continuar: el runner debe detener
-    la ejecuci?n antes de abrir CBN para evitar reprocesamiento.
+    la ejecución antes de abrir CBN para evitar reprocesamiento.
     """
     estado_journal = obtener_estado_journal(
         ruta_excel_original

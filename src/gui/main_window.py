@@ -214,7 +214,7 @@ class VentanaPrincipal(ctk.CTk):
         self._filas_tabla: dict[str, str] = {}
         self._datos_financieros: dict[str, tuple[str, str]] = {}
 
-        # CP9 - Estado independiente de sincronizaci?n Excel.
+        # CP9 - Estado independiente de sincronización Excel.
         # La consulta se ejecuta fuera del hilo de Tkinter para que
         # un lock temporal del journal nunca congele la interfaz.
         self._consulta_sync_activa = False
@@ -227,7 +227,7 @@ class VentanaPrincipal(ctk.CTk):
 
         self.after(100, self._procesar_cola)
 
-        # Primer diagn?stico poco despu?s de mostrar la ventana.
+        # Primer diagnóstico poco después de mostrar la ventana.
         self.after(
             250,
             self._ciclo_estado_sincronizacion_excel,
@@ -627,7 +627,7 @@ class VentanaPrincipal(ctk.CTk):
         self,
     ) -> None:
         """
-        Ejecuta un diagn?stico de solo lectura en segundo plano.
+        Ejecuta un diagnóstico de solo lectura en segundo plano.
 
         No sincroniza ni modifica DATA.xlsx.
         """
@@ -695,7 +695,7 @@ class VentanaPrincipal(ctk.CTk):
         self,
     ) -> None:
         """
-        Refresco peri?dico no bloqueante del indicador Excel.
+        Refresco periódico no bloqueante del indicador Excel.
         """
         self._consultar_estado_sincronizacion_excel()
 
@@ -766,7 +766,7 @@ class VentanaPrincipal(ctk.CTk):
             )
 
             # Evita mostrar un resultado viejo si el usuario
-            # seleccion? otro Excel mientras terminaba el hilo.
+            # seleccionó otro Excel mientras terminaba el hilo.
             if ruta_evento == ruta_actual:
                 resultado = evento.get(
                     "result"
@@ -797,7 +797,7 @@ class VentanaPrincipal(ctk.CTk):
                 self.etiqueta_sync_excel.configure(
                     text=(
                         "Excel: no se pudo consultar "
-                        "el estado de sincronizaci?n."
+                        "el estado de sincronización."
                     ),
                     text_color=(
                         "#C62828",
@@ -1015,7 +1015,7 @@ class VentanaPrincipal(ctk.CTk):
         if estado == "COMPLETADA":
             self.barra_progreso.set(1)
 
-        # La ejecuci?n pudo aplicar o generar nuevas entradas
+        # La ejecución pudo aplicar o generar nuevas entradas
         # del journal. Actualizamos el indicador cuanto antes.
         self._consultar_estado_sincronizacion_excel()
 

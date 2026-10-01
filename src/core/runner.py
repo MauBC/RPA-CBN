@@ -63,12 +63,12 @@ EventCallback = Callable[[dict[str, Any]], None]
 
 class SincronizacionExcelRequiereRevisionError(RuntimeError):
     """
-    Bloquea la ejecuci?n cuando existe evidencia persistente
-    de una operaci?n CBN que no pudo reconciliarse con Excel.
+    Bloquea la ejecución cuando existe evidencia persistente
+    de una operación CBN que no pudo reconciliarse con Excel.
 
-    No debe ocultarse detr?s del mensaje gen?rico de error,
+    No debe ocultarse detrás del mensaje genérico de error,
     porque el usuario necesita saber que NO debe reintentar
-    autom?ticamente la orden.
+    automáticamente la orden.
     """
     pass
 
@@ -150,7 +150,7 @@ def _persistir_resultado_excel(
         print(
             f"[PENDIENTE EXCEL] "
             f"ID_ORDEN={id_orden}. "
-            f"El resultado CBN qued? protegido "
+            f"El resultado CBN quedó protegido "
             f"en el journal persistente."
         )
 
@@ -160,11 +160,24 @@ def _persistir_resultado_excel(
                 f"{resultado.ruta_journal}"
             )
 
+    elif resultado.ruta_journal:
+        print(
+            f"[REQUIERE REVISION EXCEL] "
+            f"ID_ORDEN={id_orden}. "
+            f"CBN ya terminó la operación y el resultado "
+            f"quedó protegido en failed_updates. "
+            f"No debe reprocesarse automáticamente."
+        )
+
+        print(
+            f"Journal: {resultado.ruta_journal}"
+        )
+
     else:
         print(
             f"[ADVERTENCIA CRITICA] "
             f"ID_ORDEN={id_orden}: "
-            f"CBN ya termin? la operaci?n, "
+            f"CBN ya terminó la operación, "
             f"pero no se pudo persistir "
             f"ni en Excel ni en el journal."
         )
@@ -338,9 +351,9 @@ def _indexar_filas_pendientes(
     pendientes: list[Any],
 ) -> dict[str, int]:
     """
-    Construye una cach? ID_ORDEN -> primera fila real del Excel.
+    Construye una caché ID_ORDEN -> primera fila real del Excel.
 
-    PendienteRPA ya contiene fila_excel, as? que no es necesario
+    PendienteRPA ya contiene fila_excel, así que no es necesario
     volver a abrir y recorrer DATA.xlsx durante cada orden.
     """
     indice: dict[str, int] = {}
@@ -378,11 +391,11 @@ def _resolver_fila_excel_resultado(
     fila_excel: int | None,
 ) -> int | str:
     """
-    Ruta r?pida:
+    Ruta rápida:
         usa la fila obtenida al calcular pendientes.
 
     Fallback:
-        conserva la b?squeda hist?rica para llamadas externas
+        conserva la búsqueda histórica para llamadas externas
         que no proporcionen fila_excel.
     """
     if fila_excel is not None:
@@ -600,7 +613,7 @@ def ejecutar_rpa(
 
             if sincronizacion_inicio["total"]:
                 print(
-                    "Sincronizaci?n inicial Excel: "
+                    "Sincronización inicial Excel: "
                     f"{sincronizacion_inicio['aplicadas']} "
                     "aplicada(s), "
                     f"{sincronizacion_inicio['restantes']} "
@@ -620,10 +633,10 @@ def ejecutar_rpa(
             if overlay_pendientes["fallidas"]:
                 raise SincronizacionExcelRequiereRevisionError(
                     "Existen actualizaciones de Excel que "
-                    "no pueden resolverse autom?ticamente. "
-                    "Se requiere revisi?n manual antes de "
+                    "no pueden resolverse automáticamente. "
+                    "Se requiere revisión manual antes de "
                     "volver a ejecutar el RPA para evitar "
-                    "reprocesar ?rdenes ya ejecutadas en CBN."
+                    "reprocesar órdenes ya ejecutadas en CBN."
                 )
 
             if overlay_pendientes["total"]:
@@ -683,7 +696,7 @@ def ejecutar_rpa(
                 )
 
                 # Validamos otra vez, pero ahora exactamente sobre
-                # los templates congelados que utilizar? esta ejecuci?n.
+                # los templates congelados que utilizará esta ejecución.
                 validar_ordenes_cargadas(
                     ordenes
                 )
@@ -701,7 +714,7 @@ def ejecutar_rpa(
 
                 print(
                     f"Templates congelados correctamente: "
-                    f"{len(metadata_templates)} archivo(s) ?nico(s)."
+                    f"{len(metadata_templates)} archivo(s) único(s)."
                 )
 
                 if not ordenes:
@@ -1001,7 +1014,7 @@ def ejecutar_rpa(
 
                 if sincronizacion_final["total"]:
                     print(
-                        "Sincronizaci?n final Excel: "
+                        "Sincronización final Excel: "
                         f"{sincronizacion_final['aplicadas']} "
                         "aplicada(s), "
                         f"{sincronizacion_final['restantes']} "
@@ -1011,7 +1024,7 @@ def ejecutar_rpa(
             except Exception as error_sync_final:
                 print(
                     "[ADVERTENCIA] No se pudo completar "
-                    "la sincronizaci?n final del Excel."
+                    "la sincronización final del Excel."
                 )
                 print(
                     f"Detalle: {error_sync_final}"
