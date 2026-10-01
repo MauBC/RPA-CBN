@@ -296,3 +296,147 @@ def test_inspeccionar_pendientes_detecta_estados_inconsistentes_sin_guardar(
         inspeccionar_pendientes(ruta)
 
     assert ruta.read_bytes() == contenido_antes
+
+
+def test_actualizar_resultado_actualiza_estado_y_resumen_en_una_operacion(
+    tmp_path,
+):
+    from src.excel.state_manager import (
+        actualizar_resultado_orden,
+    )
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+            ("1001", 0),
+            ("1002", 0),
+        ],
+    )
+
+    filas = actualizar_resultado_orden(
+        ruta,
+        "1001",
+        estado_rpa=1,
+        resumen="COTIZACION FINALIZADA",
+    )
+
+    assert filas == 2
+
+    wb = load_workbook(
+        ruta,
+        data_only=True,
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        headers = {
+            str(cell.value).strip(): cell.column
+            for cell in ws[1]
+            if cell.value is not None
+        }
+
+        col_estado = headers["ESTADO_RPA"]
+        col_resumen = headers["RESUMEN"]
+
+        assert (
+            ws.cell(2, col_estado).value
+            == 1
+        )
+
+        assert (
+            ws.cell(3, col_estado).value
+            == 1
+        )
+
+        assert (
+            ws.cell(4, col_estado).value
+            == 0
+        )
+
+        assert (
+            ws.cell(2, col_resumen).value
+            == "COTIZACION FINALIZADA"
+        )
+
+        assert (
+            ws.cell(3, col_resumen).value
+            == "COTIZACION FINALIZADA"
+        )
+
+    finally:
+        wb.close()
+
+
+def test_actualizar_resultado_error_no_crea_resumen_si_no_se_envia(
+    tmp_path,
+):
+    from src.excel.state_manager import (
+        actualizar_resultado_orden,
+    )
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+        ],
+    )
+
+    actualizar_resultado_orden(
+        ruta,
+        "1001",
+        estado_rpa=2,
+        resumen=None,
+    )
+
+    wb = load_workbook(
+        ruta,
+        data_only=True,
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        headers = [
+            str(cell.value).strip()
+            for cell in ws[1]
+            if cell.value is not None
+        ]
+
+        assert "RESUMEN" not in headers
+        assert ws["B2"].value == 2
+
+    finally:
+        wb.close()
+
+
+def test_actualizar_resultado_libera_archivo(
+    tmp_path,
+):
+    from src.excel.state_manager import (
+        actualizar_resultado_orden,
+    )
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+        ],
+    )
+
+    actualizar_resultado_orden(
+        ruta,
+        "1001",
+        estado_rpa=1,
+        resumen="OK",
+    )
+
+    destino = (
+        tmp_path
+        / "DATA_RENAMED.xlsx"
+    )
+
+    ruta.rename(destino)
+
+    assert destino.exists()

@@ -27,11 +27,11 @@ from src.excel.result_writer import (
     guardar_resultado_error_validacion,
     guardar_resultados_ordenes,
 )
-from src.excel.resumen_writer import actualizar_resumen_orden
 from src.excel.state_manager import (
     crear_excel_trabajo_pendientes,
     actualizar_estado_orden,
     obtener_fila_excel_por_id,
+    actualizar_resultado_orden,
 )
 from src.flows.inicio_cotizacion import iniciar_cotizacion_con_texto
 from src.flows.proveedor import seleccionar_proveedor_por_codigo
@@ -235,15 +235,15 @@ def procesar_orden(
     info_asignacion = asignar_comparativo_desde_panel(page, orden)
     print(f"Comparativo OK: {info_asignacion.mensaje}")
 
-    actualizar_resumen_orden(
-        ruta_excel,
-        orden.id_orden,
-        getattr(info_asignacion, "resumen", ""),
+    resumen = getattr(
+        info_asignacion,
+        "resumen",
+        "",
     )
-    print(f"RESUMEN actualizado para ID_ORDEN={orden.id_orden}")
+
     print("Cotización verificada en Panel de cotizaciones.")
 
-    return info_panel
+    return info_panel, resumen
 
 
 def construir_resultado_ok(
@@ -587,7 +587,7 @@ def ejecutar_rpa(
                                 f"{obtener_fila_excel_por_id(ruta_excel, orden.id_orden)}"
                             )
 
-                            info_panel = procesar_orden(
+                            info_panel, resumen_orden = procesar_orden(
                                 page=page,
                                 orden=orden,
                                 indice=indice,
@@ -604,10 +604,11 @@ def ejecutar_rpa(
                             )
                             resultados.append(resultado_ok)
 
-                            actualizar_estado_orden(
+                            actualizar_resultado_orden(
                                 ruta_excel,
                                 orden.id_orden,
-                                1,
+                                estado_rpa=1,
+                                resumen=resumen_orden,
                             )
 
                             print(

@@ -11,11 +11,16 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from src.utils.app_paths import obtener_directorio_temporal
+from src.excel.excel_transaction import (
+    exigir_excel_disponible,
+    guardar_workbook_atomico,
+)
 
 
 HOJA_ORDENES = "Ordenes"
 COL_ID_ORDEN = "ID_ORDEN"
 COL_ESTADO_RPA = "ESTADO_RPA"
+COL_RESUMEN = "RESUMEN"
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,22 @@ def _asegurar_columna_estado(ws) -> int:
 
 
 
+
+def _asegurar_columna_resumen(ws) -> int:
+    headers = _headers_ws(ws)
+
+    if COL_RESUMEN in headers:
+        return headers[COL_RESUMEN]
+
+    nueva_col = ws.max_column + 1
+    ws.cell(
+        row=1,
+        column=nueva_col,
+    ).value = COL_RESUMEN
+
+    return nueva_col
+
+
 def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
     """
     ID_ORDEN repetidos est?n permitidos porque representan posiciones.
@@ -228,6 +249,7 @@ def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
     ruta_excel = Path(ruta_excel)
 
     with _excel_lock(ruta_excel):
+        exigir_excel_disponible(ruta_excel)
         wb = load_workbook(ruta_excel)
 
         try:
@@ -292,7 +314,7 @@ def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
                     + "\n".join(inconsistencias)
                 )
 
-            wb.save(ruta_excel)
+            guardar_workbook_atomico(wb, ruta_excel)
 
         finally:
             wb.close()
@@ -493,6 +515,134 @@ def obtener_fila_excel_por_id(
     finally:
         wb.close()
 
+
+def actualizar_resultado_orden(
+    ruta_excel: str | Path,
+    id_orden_buscado: Any,
+    *,
+    estado_rpa: int,
+    resumen: str | None = None,
+) -> int:
+    """
+    Actualiza en una ?nica apertura/guardado los campos controlados
+    por el RPA para todas las filas de un ID_ORDEN.
+
+    - ESTADO_RPA siempre se actualiza.
+    - RESUMEN solo se actualiza cuando resumen no es None.
+    - Todas las posiciones del mismo ID_ORDEN reciben los mismos valores.
+
+    Retorna la cantidad de filas actualizadas.
+    """
+    if estado_rpa not in (0, 1, 2):
+        raise ValueError(
+            "estado_rpa solo puede ser 0, 1 o 2."
+        )
+
+    ruta_excel = Path(ruta_excel)
+
+    id_orden_buscado = _normalizar_id(
+        id_orden_buscado
+    )
+
+    if not id_orden_buscado:
+        raise ValueError(
+            "id_orden_buscado no puede estar vac?o."
+        )
+
+    texto_resumen = (
+        None
+        if resumen is None
+        else str(resumen).strip()
+    )
+
+    with _excel_lock(ruta_excel):
+        exigir_excel_disponible(ruta_excel)
+        wb = load_workbook(ruta_excel)
+
+        try:
+            if HOJA_ORDENES not in wb.sheetnames:
+                raise ValueError(
+                    f"No existe la hoja '{HOJA_ORDENES}'."
+                )
+
+            ws = wb[HOJA_ORDENES]
+            headers = _headers_ws(ws)
+
+            if COL_ID_ORDEN not in headers:
+                raise ValueError(
+                    f"No existe la columna "
+                    f"'{COL_ID_ORDEN}'."
+                )
+
+            col_id = headers[
+                COL_ID_ORDEN
+            ]
+
+            col_estado = (
+                _asegurar_columna_estado(ws)
+            )
+
+            col_resumen = None
+
+            if texto_resumen is not None:
+                col_resumen = (
+                    _asegurar_columna_resumen(ws)
+                )
+
+            filas_actualizadas = 0
+
+            for fila in range(
+                2,
+                ws.max_row + 1,
+            ):
+                id_orden = _normalizar_id(
+                    ws.cell(
+                        row=fila,
+                        column=col_id,
+                    ).value
+                )
+
+                if id_orden != id_orden_buscado:
+                    continue
+
+                ws.cell(
+                    row=fila,
+                    column=col_estado,
+                ).value = estado_rpa
+
+                if col_resumen is not None:
+                    ws.cell(
+                        row=fila,
+                        column=col_resumen,
+                    ).value = texto_resumen
+
+                filas_actualizadas += 1
+
+            if filas_actualizadas == 0:
+                raise ValueError(
+                    f"No se encontr? "
+                    f"ID_ORDEN={id_orden_buscado} "
+                    f"para actualizar resultado."
+                )
+
+            # ?NICO save de la operaci?n.
+            guardar_workbook_atomico(wb, ruta_excel)
+
+        finally:
+            wb.close()
+
+    print(
+        f"Resultado aplicado a "
+        f"{filas_actualizadas} fila(s) "
+        f"del ID_ORDEN={id_orden_buscado}: "
+        f"ESTADO_RPA={estado_rpa}, "
+        f"RESUMEN="
+        f"{'actualizado' if texto_resumen is not None else 'sin cambios'}."
+    )
+
+    return filas_actualizadas
+
+
 def actualizar_estado_orden(
     ruta_excel: str | Path,
     id_orden_buscado: Any,
@@ -508,6 +658,7 @@ def actualizar_estado_orden(
     id_orden_buscado = _normalizar_id(id_orden_buscado)
 
     with _excel_lock(ruta_excel):
+        exigir_excel_disponible(ruta_excel)
         wb = load_workbook(ruta_excel)
 
         try:
@@ -548,7 +699,7 @@ def actualizar_estado_orden(
                     f"para actualizar ESTADO_RPA."
                 )
 
-            wb.save(ruta_excel)
+            guardar_workbook_atomico(wb, ruta_excel)
 
         finally:
             wb.close()
