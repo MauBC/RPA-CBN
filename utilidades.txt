@@ -1,0 +1,10 @@
+CORRER APP:
+python .\app.py
+
+CORRER INSPECCIONADOR:
+python .\scripts\inspeccionar.py
+
+cd C:\Users\mbobadillac\Codigos\RPA_CBN
+
+VER TAMAÑO TEXTOS
+python -c "import pandas as pd; df=pd.read_excel('data/DATA.xlsx', sheet_name='Ordenes', dtype=object); cols=['ID_ORDEN','TEXTO','ESTADO_RPA']; print(df[cols].assign(LARGO=df['TEXTO'].astype(str).str.len()).to_string(index=False))"
