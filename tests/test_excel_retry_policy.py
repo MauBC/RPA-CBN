@@ -132,3 +132,28 @@ def test_error_logico_no_se_reintenta(
         resultado.clasificacion.recuperable
         is False
     )
+
+
+def test_cambio_concurrente_excel_es_recuperable():
+    from src.excel.excel_transaction import (
+        ExcelArchivoCambioConcurrenteError,
+    )
+
+    error = ExcelArchivoCambioConcurrenteError(
+        "DATA.xlsx",
+        "sha-anterior",
+        "sha-nuevo",
+    )
+
+    resultado = (
+        clasificar_error_persistencia(
+            error
+        )
+    )
+
+    assert resultado.recuperable is True
+
+    assert (
+        resultado.codigo
+        == "EXCEL_CAMBIO_CONCURRENTE"
+    )

@@ -7,6 +7,7 @@ import time
 
 from src.excel.excel_transaction import (
     ExcelAccesoError,
+    ExcelArchivoCambioConcurrenteError,
     ExcelArchivoOcupadoError,
     ExcelPersistenciaError,
 )
@@ -132,6 +133,19 @@ def clasificar_error_persistencia(
     # --------------------------------------------------------
 
     for actual in cadena:
+        if isinstance(
+            actual,
+            ExcelArchivoCambioConcurrenteError,
+        ):
+            return ClasificacionErrorPersistencia(
+                tipo=(
+                    TipoErrorPersistencia.RECUPERABLE
+                ),
+                codigo="EXCEL_CAMBIO_CONCURRENTE",
+                detalle=str(actual),
+                winerror=None,
+            )
+
         if isinstance(
             actual,
             ExcelArchivoOcupadoError,

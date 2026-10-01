@@ -1062,3 +1062,457 @@ def test_overlay_bloquea_failed_update_para_evitar_reprocesamiento(
     )
 
     assert fila_snapshot["estado"] == 0
+
+
+def test_sync_detecta_edicion_humana_de_orden_encolada(
+    tmp_path,
+    monkeypatch,
+):
+    from src.excel.concurrency_guard import (
+        capturar_versiones_ordenes,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    version = (
+        capturar_versiones_ordenes(
+            excel,
+            ["1001"],
+        )["1001"]
+    )
+
+    encolar_actualizacion_excel(
+        excel,
+        "1001",
+        estado_rpa=1,
+        resumen="PORTAL OK",
+        version_esperada=version,
+    )
+
+    wb = load_workbook(
+        excel
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        # Nueva columna de negocio con valor para
+        # exactamente la orden ya procesada.
+        ws.cell(
+            row=1,
+            column=4,
+        ).value = "CAMBIO_HUMANO"
+
+        ws.cell(
+            row=2,
+            column=4,
+        ).value = "MODIFICADO"
+
+        wb.save(
+            excel
+        )
+
+    finally:
+        wb.close()
+
+    resultado = (
+        sincronizar_actualizaciones_pendientes(
+            excel
+        )
+    )
+
+    assert resultado["aplicadas"] == 0
+    assert resultado["aisladas"] == 1
+    assert resultado["restantes"] == 0
+
+    assert (
+        obtener_actualizaciones_pendientes(
+            excel
+        )
+        == []
+    )
+
+    fallidas = (
+        obtener_actualizaciones_fallidas(
+            excel
+        )
+    )
+
+    assert len(fallidas) == 1
+
+    assert (
+        fallidas[0]["id_orden"]
+        == "1001"
+    )
+
+    fila = _leer_fila(
+        excel,
+        "1001",
+    )
+
+    # El RPA NO debe marcar la orden como terminada
+    # si ya no representa la version procesada.
+    assert fila["estado"] == 0
+
+
+def test_overlay_detecta_conflicto_de_version_pendiente(
+    tmp_path,
+    monkeypatch,
+):
+    from src.excel.concurrency_guard import (
+        capturar_versiones_ordenes,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    original = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    version = (
+        capturar_versiones_ordenes(
+            original,
+            ["1001"],
+        )["1001"]
+    )
+
+    encolar_actualizacion_excel(
+        original,
+        "1001",
+        estado_rpa=1,
+        resumen="PORTAL OK",
+        version_esperada=version,
+    )
+
+    wb = load_workbook(
+        original
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        ws.cell(
+            row=1,
+            column=4,
+        ).value = "CAMBIO_HUMANO"
+
+        ws.cell(
+            row=2,
+            column=4,
+        ).value = "MODIFICADO"
+
+        wb.save(
+            original
+        )
+
+    finally:
+        wb.close()
+
+    snapshot = (
+        tmp_path
+        / "entrada_actual.xlsx"
+    )
+
+    snapshot.write_bytes(
+        original.read_bytes()
+    )
+
+    resultado = (
+        aplicar_actualizaciones_pendientes_a_snapshot(
+            snapshot,
+            original,
+        )
+    )
+
+    assert resultado["aplicadas"] == 0
+    assert resultado["fallidas"] == 1
+
+
+def test_cambio_concurrente_en_otra_orden_se_reintenta_y_preserva(
+    tmp_path,
+    monkeypatch,
+):
+    import src.excel.state_manager as state_manager
+
+    from src.excel.concurrency_guard import (
+        capturar_versiones_ordenes,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    monkeypatch.setattr(
+        "src.excel.retry_policy.time.sleep",
+        lambda _: None,
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    # Agregamos una columna humana inicialmente vacía.
+    wb = load_workbook(excel)
+
+    try:
+        ws = wb["Ordenes"]
+        ws.cell(
+            row=1,
+            column=4,
+        ).value = "NOTA_HUMANA"
+
+        wb.save(excel)
+
+    finally:
+        wb.close()
+
+    version = (
+        capturar_versiones_ordenes(
+            excel,
+            ["1001"],
+        )["1001"]
+    )
+
+    original_guardar = (
+        state_manager.guardar_workbook_atomico
+    )
+
+    llamadas = {
+        "total": 0,
+    }
+
+    def guardar_con_carrera(
+        workbook,
+        ruta_excel,
+        **kwargs,
+    ):
+        llamadas["total"] += 1
+
+        if llamadas["total"] == 1:
+            externo = load_workbook(
+                ruta_excel
+            )
+
+            try:
+                ws = externo["Ordenes"]
+
+                # Modificamos ?nicamente 1002.
+                ws.cell(
+                    row=3,
+                    column=4,
+                ).value = "CAMBIO HUMANO 1002"
+
+                externo.save(
+                    ruta_excel
+                )
+
+            finally:
+                externo.close()
+
+        return original_guardar(
+            workbook,
+            ruta_excel,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        state_manager,
+        "guardar_workbook_atomico",
+        guardar_con_carrera,
+    )
+
+    resultado = (
+        persistir_o_encolar_resultado(
+            excel,
+            "1001",
+            estado_rpa=1,
+            resumen="PORTAL OK",
+            version_esperada=version,
+        )
+    )
+
+    assert resultado.aplicado is True
+    assert resultado.intentos == 2
+
+    wb = load_workbook(
+        excel,
+        data_only=True,
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        # Resultado RPA aplicado.
+        assert ws["B2"].value == 1
+
+        # Cambio humano de otra orden preservado.
+        assert (
+            ws.cell(
+                row=3,
+                column=4,
+            ).value
+            == "CAMBIO HUMANO 1002"
+        )
+
+    finally:
+        wb.close()
+
+
+def test_cambio_concurrente_en_misma_orden_termina_en_failed_update(
+    tmp_path,
+    monkeypatch,
+):
+    import src.excel.state_manager as state_manager
+
+    from src.excel.concurrency_guard import (
+        capturar_versiones_ordenes,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    monkeypatch.setattr(
+        "src.excel.retry_policy.time.sleep",
+        lambda _: None,
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    wb = load_workbook(excel)
+
+    try:
+        ws = wb["Ordenes"]
+        ws.cell(
+            row=1,
+            column=4,
+        ).value = "NOTA_HUMANA"
+
+        wb.save(excel)
+
+    finally:
+        wb.close()
+
+    version = (
+        capturar_versiones_ordenes(
+            excel,
+            ["1001"],
+        )["1001"]
+    )
+
+    original_guardar = (
+        state_manager.guardar_workbook_atomico
+    )
+
+    llamadas = {
+        "total": 0,
+    }
+
+    def guardar_con_carrera(
+        workbook,
+        ruta_excel,
+        **kwargs,
+    ):
+        llamadas["total"] += 1
+
+        if llamadas["total"] == 1:
+            externo = load_workbook(
+                ruta_excel
+            )
+
+            try:
+                ws = externo["Ordenes"]
+
+                # Ahora s? se modifica la misma orden
+                # que el portal ya proces?.
+                ws.cell(
+                    row=2,
+                    column=4,
+                ).value = "CAMBIO HUMANO 1001"
+
+                externo.save(
+                    ruta_excel
+                )
+
+            finally:
+                externo.close()
+
+        return original_guardar(
+            workbook,
+            ruta_excel,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        state_manager,
+        "guardar_workbook_atomico",
+        guardar_con_carrera,
+    )
+
+    resultado = (
+        persistir_o_encolar_resultado(
+            excel,
+            "1001",
+            estado_rpa=1,
+            resumen="PORTAL OK",
+            version_esperada=version,
+        )
+    )
+
+    # Primer intento:
+    # cambio físico concurrente -> retry.
+    #
+    # Segundo:
+    # CP11A detecta que 1001 cambió -> no recuperable.
+    assert (
+        resultado.estado
+        == EstadoPersistenciaExcel.NO_PERSISTIDO
+    )
+
+    assert resultado.recuperable is False
+
+    fallidas = (
+        obtener_actualizaciones_fallidas(
+            excel
+        )
+    )
+
+    assert len(fallidas) == 1
+    assert fallidas[0]["id_orden"] == "1001"
+
+    wb = load_workbook(
+        excel,
+        data_only=True,
+    )
+
+    try:
+        ws = wb["Ordenes"]
+
+        # No sobrescribimos el estado.
+        assert ws["B2"].value == 0
+
+        # Tampoco perdemos el cambio humano.
+        assert (
+            ws.cell(
+                row=2,
+                column=4,
+            ).value
+            == "CAMBIO HUMANO 1001"
+        )
+
+    finally:
+        wb.close()

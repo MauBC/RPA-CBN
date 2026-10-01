@@ -22,6 +22,9 @@ from src.excel.snapshot_manager import (
     crear_snapshot_estable,
     guardar_manifest_snapshots,
 )
+from src.excel.concurrency_guard import (
+    capturar_versiones_ordenes,
+)
 from src.excel.validators import ValidacionExcelError
 from src.excel.result_writer import (
     guardar_resultado_error_validacion,
@@ -125,6 +128,7 @@ def _persistir_resultado_excel(
     *,
     estado_rpa: int,
     resumen: str | None,
+    version_esperada: dict[str, Any] | None = None,
 ):
     """
     Persiste el resultado de una orden sin convertir un fallo
@@ -138,6 +142,7 @@ def _persistir_resultado_excel(
         id_orden,
         estado_rpa=estado_rpa,
         resumen=resumen,
+        version_esperada=version_esperada,
     )
 
     if resultado.aplicado:
@@ -682,6 +687,17 @@ def ejecutar_rpa(
                 )
             )
 
+            versiones_excel_por_id = (
+                capturar_versiones_ordenes(
+                    entrada_original,
+                    [
+                        pendiente.id_orden
+                        for pendiente
+                        in pendientes
+                    ],
+                )
+            )
+
             if not pendientes:
                 estado_final = "SIN_PENDIENTES"
                 mensaje_final = "No hay órdenes pendientes con ESTADO_RPA = 0."
@@ -786,6 +802,12 @@ def ejecutar_rpa(
                             )
                         )
 
+                        version_excel_orden = (
+                            versiones_excel_por_id.get(
+                                str(orden.id_orden)
+                            )
+                        )
+
                         if cancelar_evento.is_set():
                             estado_final = "CANCELADA"
                             mensaje_final = (
@@ -833,6 +855,7 @@ def ejecutar_rpa(
                                 orden.id_orden,
                                 estado_rpa=1,
                                 resumen=resumen_orden,
+                                version_esperada=version_excel_orden,
                             )
 
                             print(
@@ -893,6 +916,7 @@ def ejecutar_rpa(
                                 orden.id_orden,
                                 estado_rpa=2,
                                 resumen=None,
+                                version_esperada=version_excel_orden,
                             )
 
                             _emitir(
@@ -965,6 +989,7 @@ def ejecutar_rpa(
                                 orden.id_orden,
                                 estado_rpa=2,
                                 resumen=None,
+                                version_esperada=version_excel_orden,
                             )
 
                             _emitir(

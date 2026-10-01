@@ -575,6 +575,7 @@ def encolar_actualizacion_excel(
     resumen: str | None,
     detalle_error: str = "",
     intentos_realizados: int = 0,
+    version_esperada: dict[str, Any] | None = None,
 ) -> Path:
     if estado_rpa not in (
         0,
@@ -650,6 +651,11 @@ def encolar_actualizacion_excel(
             "intentos": intentos,
             "ultimo_error": str(
                 detalle_error or ""
+            ),
+            "version_esperada": (
+                dict(version_esperada)
+                if version_esperada is not None
+                else None
             ),
         }
 
@@ -928,6 +934,7 @@ def registrar_actualizacion_fallida_excel(
     detalle_error: str,
     tipo_error: str,
     intentos_realizados: int = 1,
+    version_esperada: dict[str, Any] | None = None,
 ) -> Path:
     """
     Conserva de forma durable un resultado que CBN ya produjo,
@@ -1059,6 +1066,20 @@ def registrar_actualizacion_fallida_excel(
                 tipo_error
             ),
             "sync_recoverable": False,
+            "version_esperada": (
+                dict(version_esperada)
+                if version_esperada is not None
+                else (
+                    anterior.get(
+                        "version_esperada"
+                    )
+                    if isinstance(
+                        anterior,
+                        dict,
+                    )
+                    else None
+                )
+            ),
         }
 
         journal["version"] = (
@@ -1087,6 +1108,7 @@ def persistir_o_encolar_resultado(
     *,
     estado_rpa: int,
     resumen: str | None,
+    version_esperada: dict[str, Any] | None = None,
 ) -> ResultadoPersistenciaExcel:
     """
     Intenta persistir inmediatamente en DATA.xlsx.
@@ -1112,6 +1134,7 @@ def persistir_o_encolar_resultado(
             id_normalizado,
             estado_rpa=estado_rpa,
             resumen=resumen,
+            version_esperada=version_esperada,
         )
 
     intento = ejecutar_con_reintentos(
@@ -1184,6 +1207,7 @@ def persistir_o_encolar_resultado(
                     intentos_realizados=(
                         intento.intentos
                     ),
+                    version_esperada=version_esperada,
                 )
             )
 
@@ -1249,6 +1273,7 @@ def persistir_o_encolar_resultado(
             intentos_realizados=(
                 intento.intentos
             ),
+            version_esperada=version_esperada,
         )
 
         return ResultadoPersistenciaExcel(
@@ -1366,6 +1391,9 @@ def sincronizar_actualizaciones_pendientes(
                 ),
                 resumen=actualizacion.get(
                     "resumen"
+                ),
+                version_esperada=actualizacion.get(
+                    "version_esperada"
                 ),
             )
 
@@ -1658,6 +1686,9 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
                 ),
                 resumen=actualizacion.get(
                     "resumen"
+                ),
+                version_esperada=actualizacion.get(
+                    "version_esperada"
                 ),
             )
 
