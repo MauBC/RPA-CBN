@@ -199,3 +199,100 @@ def test_actualizar_estado_libera_excel_despues_de_guardar(tmp_path):
     ruta.rename(destino)
 
     assert destino.exists()
+
+
+def test_inspeccionar_pendientes_sin_estado_no_modifica_excel(tmp_path):
+    from src.excel.state_manager import inspeccionar_pendientes
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001",),
+            ("1001",),
+            ("1002",),
+        ],
+        incluir_estado=False,
+    )
+
+    contenido_antes = ruta.read_bytes()
+
+    pendientes = inspeccionar_pendientes(ruta)
+
+    contenido_despues = ruta.read_bytes()
+
+    assert [
+        pendiente.id_orden
+        for pendiente in pendientes
+    ] == [
+        "1001",
+        "1002",
+    ]
+
+    assert contenido_despues == contenido_antes
+
+    wb = load_workbook(ruta, data_only=True)
+
+    try:
+        ws = wb["Ordenes"]
+
+        headers = [
+            str(cell.value).strip()
+            for cell in ws[1]
+            if cell.value is not None
+        ]
+
+        assert "ESTADO_RPA" not in headers
+
+    finally:
+        wb.close()
+
+
+def test_inspeccionar_pendientes_respeta_estado_sin_modificar(tmp_path):
+    from src.excel.state_manager import inspeccionar_pendientes
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+            ("1001", 0),
+            ("1002", 1),
+            ("1003", 2),
+        ],
+    )
+
+    contenido_antes = ruta.read_bytes()
+
+    pendientes = inspeccionar_pendientes(ruta)
+
+    contenido_despues = ruta.read_bytes()
+
+    assert [
+        pendiente.id_orden
+        for pendiente in pendientes
+    ] == ["1001"]
+
+    assert contenido_despues == contenido_antes
+
+
+def test_inspeccionar_pendientes_detecta_estados_inconsistentes_sin_guardar(
+    tmp_path,
+):
+    from src.excel.state_manager import inspeccionar_pendientes
+
+    ruta = crear_excel_estados(
+        tmp_path / "DATA.xlsx",
+        [
+            ("1001", 0),
+            ("1001", 1),
+        ],
+    )
+
+    contenido_antes = ruta.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="mismo ID_ORDEN",
+    ):
+        inspeccionar_pendientes(ruta)
+
+    assert ruta.read_bytes() == contenido_antes

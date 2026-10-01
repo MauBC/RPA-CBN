@@ -293,7 +293,10 @@ def validar_excel_sin_ejecutar(ruta_excel: str | Path) -> dict[str, Any]:
     ruta_trabajo: Path | None = None
 
     try:
-        ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(ruta_excel)
+        ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(
+            ruta_excel,
+            solo_lectura=True,
+        )
 
         if not pendientes:
             return {

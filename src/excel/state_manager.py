@@ -297,6 +297,129 @@ def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
         finally:
             wb.close()
 
+
+def inspeccionar_pendientes(
+    ruta_excel: str | Path,
+) -> list[PendienteRPA]:
+    """
+    Inspecciona las ?rdenes pendientes SIN modificar el Excel original.
+
+    Reglas:
+    - Si ESTADO_RPA no existe, se considera estado 0 en memoria.
+    - Si ESTADO_RPA existe, se respetan sus valores actuales.
+    - ID_ORDEN repetidos deben mantener el mismo estado.
+    - Nunca agrega columnas.
+    - Nunca ejecuta wb.save().
+    """
+    ruta_excel = Path(ruta_excel)
+
+    wb = load_workbook(
+        ruta_excel,
+        read_only=True,
+        data_only=True,
+    )
+
+    try:
+        if HOJA_ORDENES not in wb.sheetnames:
+            raise ValueError(
+                f"No existe la hoja '{HOJA_ORDENES}' "
+                f"en {ruta_excel}."
+            )
+
+        ws = wb[HOJA_ORDENES]
+        headers = _headers_ws(ws)
+
+        if COL_ID_ORDEN not in headers:
+            raise ValueError(
+                f"No existe la columna '{COL_ID_ORDEN}' "
+                f"en la hoja '{HOJA_ORDENES}'."
+            )
+
+        col_id = headers[COL_ID_ORDEN]
+        col_estado = headers.get(COL_ESTADO_RPA)
+
+        estados_por_id: dict[
+            str,
+            list[tuple[int, int | None]],
+        ] = {}
+
+        pendientes: list[PendienteRPA] = []
+        ids_vistos: set[str] = set()
+
+        for fila in range(2, ws.max_row + 1):
+            id_orden = _normalizar_id(
+                ws.cell(
+                    row=fila,
+                    column=col_id,
+                ).value
+            )
+
+            if not id_orden:
+                continue
+
+            if col_estado is None:
+                # ESTADO_RPA todav?a no existe.
+                # Durante VALIDACI?N lo simulamos como pendiente,
+                # sin modificar el workbook original.
+                estado = 0
+            else:
+                estado = _estado_a_int(
+                    ws.cell(
+                        row=fila,
+                        column=col_estado,
+                    ).value
+                )
+
+            estados_por_id.setdefault(
+                id_orden,
+                [],
+            ).append((fila, estado))
+
+            if id_orden not in ids_vistos:
+                ids_vistos.add(id_orden)
+
+                if estado == 0:
+                    pendientes.append(
+                        PendienteRPA(
+                            id_orden=id_orden,
+                            fila_excel=fila,
+                            estado_rpa=0,
+                        )
+                    )
+
+        inconsistencias: list[str] = []
+
+        for id_orden, datos in estados_por_id.items():
+            estados = {
+                estado
+                for _, estado in datos
+            }
+
+            if len(estados) > 1:
+                detalle = ", ".join(
+                    f"fila {fila}={estado}"
+                    for fila, estado in datos
+                )
+
+                inconsistencias.append(
+                    f"ID_ORDEN={id_orden}: {detalle}"
+                )
+
+        if inconsistencias:
+            raise ValueError(
+                "Las filas de un mismo ID_ORDEN deben tener "
+                "el mismo ESTADO_RPA:\n"
+                + "\n".join(inconsistencias)
+            )
+
+        return _filtrar_pendientes_por_worker(
+            pendientes
+        )
+
+    finally:
+        wb.close()
+
+
 def obtener_pendientes(ruta_excel: str | Path) -> list[PendienteRPA]:
     ruta_excel = Path(ruta_excel)
 
@@ -436,7 +559,11 @@ def actualizar_estado_orden(
         f"del ID_ORDEN={id_orden_buscado}."
     )
 
-def crear_excel_trabajo_pendientes(ruta_excel: str | Path) -> tuple[Path, list[PendienteRPA]]:
+def crear_excel_trabajo_pendientes(
+    ruta_excel: str | Path,
+    *,
+    solo_lectura: bool = False,
+) -> tuple[Path, list[PendienteRPA]]:
     """
     Crea un Excel temporal con solo las órdenes ESTADO_RPA=0.
     Con RPA_WORKERS=2:
@@ -445,7 +572,10 @@ def crear_excel_trabajo_pendientes(ruta_excel: str | Path) -> tuple[Path, list[P
     """
     ruta_excel = Path(ruta_excel)
 
-    pendientes = obtener_pendientes(ruta_excel)
+    if solo_lectura:
+        pendientes = inspeccionar_pendientes(ruta_excel)
+    else:
+        pendientes = obtener_pendientes(ruta_excel)
 
     ids_pendientes = {p.id_orden for p in pendientes}
 
