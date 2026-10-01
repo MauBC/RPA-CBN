@@ -142,3 +142,12 @@ $RECYCLE.BIN/
 ~$*.xlsx
 ~$*.xlsm
 ~$*.xls
+
+# Baselines locales de desarrollo
+CP*_BASELINE.txt
+
+# Backups locales de checkpoints
+_backup_*/
+
+# Laboratorio local
+pruebas_excel/

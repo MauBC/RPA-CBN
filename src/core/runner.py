@@ -13,17 +13,25 @@ from src.browser.auth import (
     NavegadorCerradoPorUsuarioError,
     esperar_login_manual,
 )
-from src.excel.reader import leer_ordenes_excel
+from src.excel.reader import (
+    leer_ordenes_excel,
+    validar_ordenes_cargadas,
+)
+from src.excel.snapshot_manager import (
+    congelar_templates_ordenes,
+    crear_snapshot_estable,
+    guardar_manifest_snapshots,
+)
 from src.excel.validators import ValidacionExcelError
 from src.excel.result_writer import (
     guardar_resultado_error_validacion,
     guardar_resultados_ordenes,
 )
-from src.excel.resumen_writer import actualizar_resumen_orden
 from src.excel.state_manager import (
     crear_excel_trabajo_pendientes,
     actualizar_estado_orden,
     obtener_fila_excel_por_id,
+    actualizar_resultado_orden,
 )
 from src.flows.inicio_cotizacion import iniciar_cotizacion_con_texto
 from src.flows.proveedor import seleccionar_proveedor_por_codigo
@@ -227,15 +235,15 @@ def procesar_orden(
     info_asignacion = asignar_comparativo_desde_panel(page, orden)
     print(f"Comparativo OK: {info_asignacion.mensaje}")
 
-    actualizar_resumen_orden(
-        ruta_excel,
-        orden.id_orden,
-        getattr(info_asignacion, "resumen", ""),
+    resumen = getattr(
+        info_asignacion,
+        "resumen",
+        "",
     )
-    print(f"RESUMEN actualizado para ID_ORDEN={orden.id_orden}")
+
     print("Cotización verificada en Panel de cotizaciones.")
 
-    return info_panel
+    return info_panel, resumen
 
 
 def construir_resultado_ok(
@@ -293,7 +301,10 @@ def validar_excel_sin_ejecutar(ruta_excel: str | Path) -> dict[str, Any]:
     ruta_trabajo: Path | None = None
 
     try:
-        ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(ruta_excel)
+        ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(
+            ruta_excel,
+            solo_lectura=True,
+        )
 
         if not pendientes:
             return {
@@ -394,7 +405,12 @@ def ejecutar_rpa(
     preparar_carpetas()
 
     entrada_original = directorio / f"entrada_original{ruta_excel.suffix.lower()}"
-    _copiar_si_existe(ruta_excel, entrada_original)
+
+    directorio_inputs = directorio / "inputs"
+    directorio_templates = directorio_inputs / "templates"
+    ruta_manifest = directorio_inputs / "snapshot_manifest.json"
+
+    metadata_entrada: dict[str, Any] | None = None
 
     _emitir(
         callback,
@@ -414,6 +430,29 @@ def ejecutar_rpa(
 
     with capturar_salida_ejecucion(directorio, callback) as ruta_log:
         try:
+            metadata_entrada = crear_snapshot_estable(
+                ruta_excel,
+                entrada_original,
+            )
+
+            metadata_entrada["tipo"] = "excel_principal"
+
+            guardar_manifest_snapshots(
+                ruta_manifest,
+                metadata_entrada,
+                [],
+            )
+
+            print(
+                f"Snapshot de entrada creado: "
+                f"{entrada_original}"
+            )
+
+            print(
+                f"SHA256 entrada: "
+                f"{metadata_entrada['sha256']}"
+            )
+
             print("============================================================")
             print("RPA CBN - INICIO DE EJECUCIÓN")
             print(f"Archivo: {ruta_excel}")
@@ -424,7 +463,7 @@ def ejecutar_rpa(
             _emitir(callback, "validation_started", excel=str(ruta_excel))
             print("Leyendo y validando Excel...")
 
-            ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(ruta_excel)
+            ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(entrada_original)
 
             if not pendientes:
                 estado_final = "SIN_PENDIENTES"
@@ -433,6 +472,33 @@ def ejecutar_rpa(
                 _emitir(callback, "no_pending", message=mensaje_final)
             else:
                 ordenes = leer_ordenes_excel(ruta_trabajo)
+
+                ordenes, metadata_templates = congelar_templates_ordenes(
+                    ordenes,
+                    directorio_templates,
+                )
+
+                # Validamos otra vez, pero ahora exactamente sobre
+                # los templates congelados que utilizar? esta ejecuci?n.
+                validar_ordenes_cargadas(
+                    ordenes
+                )
+
+                if metadata_entrada is None:
+                    raise RuntimeError(
+                        "No existe metadata del snapshot principal."
+                    )
+
+                guardar_manifest_snapshots(
+                    ruta_manifest,
+                    metadata_entrada,
+                    metadata_templates,
+                )
+
+                print(
+                    f"Templates congelados correctamente: "
+                    f"{len(metadata_templates)} archivo(s) ?nico(s)."
+                )
 
                 if not ordenes:
                     raise ValidacionExcelError(
@@ -521,7 +587,7 @@ def ejecutar_rpa(
                                 f"{obtener_fila_excel_por_id(ruta_excel, orden.id_orden)}"
                             )
 
-                            info_panel = procesar_orden(
+                            info_panel, resumen_orden = procesar_orden(
                                 page=page,
                                 orden=orden,
                                 indice=indice,
@@ -538,10 +604,11 @@ def ejecutar_rpa(
                             )
                             resultados.append(resultado_ok)
 
-                            actualizar_estado_orden(
+                            actualizar_resultado_orden(
                                 ruta_excel,
                                 orden.id_orden,
-                                1,
+                                estado_rpa=1,
+                                resumen=resumen_orden,
                             )
 
                             print(

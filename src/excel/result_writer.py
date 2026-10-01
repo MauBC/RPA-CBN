@@ -76,49 +76,97 @@ def _excel_lock(ruta_excel: str | Path, timeout_segundos: int = 180):
             pass
 
 
-def _ajustar_hoja_resultado(ruta_salida: Path, hoja: str = "Resultado_Ordenes") -> None:
+def _ajustar_hoja_resultado(
+    ruta_salida: Path,
+    hoja: str = "Resultado_Ordenes",
+) -> None:
     wb = load_workbook(ruta_salida)
 
-    if hoja not in wb.sheetnames:
+    try:
+        if hoja not in wb.sheetnames:
+            wb.save(ruta_salida)
+            return
+
+        ws = wb[hoja]
+
+        fill_header = PatternFill(
+            "solid",
+            fgColor="1F4E78",
+        )
+
+        font_header = Font(
+            color="FFFFFF",
+            bold=True,
+        )
+
+        for cell in ws[1]:
+            cell.fill = fill_header
+            cell.font = font_header
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+            )
+
+        for col_idx, column_cells in enumerate(
+            ws.columns,
+            start=1,
+        ):
+            max_len = 10
+
+            for cell in column_cells:
+                value = (
+                    ""
+                    if cell.value is None
+                    else str(cell.value)
+                )
+
+                max_len = max(
+                    max_len,
+                    min(len(value) + 2, 70),
+                )
+
+            ws.column_dimensions[
+                get_column_letter(col_idx)
+            ].width = max_len
+
+        for row in ws.iter_rows(min_row=2):
+            estado = (
+                str(row[3].value or "").upper()
+                if len(row) >= 4
+                else ""
+            )
+
+            if estado == "OK":
+                fill = PatternFill(
+                    "solid",
+                    fgColor="E2F0D9",
+                )
+
+            elif estado.startswith("ERROR"):
+                fill = PatternFill(
+                    "solid",
+                    fgColor="FCE4D6",
+                )
+
+            else:
+                fill = PatternFill(
+                    "solid",
+                    fgColor="FFF2CC",
+                )
+
+            for cell in row:
+                cell.fill = fill
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=True,
+                )
+
+        ws.freeze_panes = "A2"
+
         wb.save(ruta_salida)
-        return
 
-    ws = wb[hoja]
-
-    fill_header = PatternFill("solid", fgColor="1F4E78")
-    font_header = Font(color="FFFFFF", bold=True)
-
-    for cell in ws[1]:
-        cell.fill = fill_header
-        cell.font = font_header
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for col_idx, column_cells in enumerate(ws.columns, start=1):
-        max_len = 10
-
-        for cell in column_cells:
-            value = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, min(len(value) + 2, 70))
-
-        ws.column_dimensions[get_column_letter(col_idx)].width = max_len
-
-    for row in ws.iter_rows(min_row=2):
-        estado = str(row[3].value or "").upper() if len(row) >= 4 else ""
-
-        if estado == "OK":
-            fill = PatternFill("solid", fgColor="E2F0D9")
-        elif estado.startswith("ERROR"):
-            fill = PatternFill("solid", fgColor="FCE4D6")
-        else:
-            fill = PatternFill("solid", fgColor="FFF2CC")
-
-        for cell in row:
-            cell.fill = fill
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-    ws.freeze_panes = "A2"
-    wb.save(ruta_salida)
-
+    finally:
+        wb.close()
 
 def guardar_resultados_ordenes(
     ruta_excel: str | Path,
