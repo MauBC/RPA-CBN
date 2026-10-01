@@ -29,9 +29,12 @@ from src.excel.result_writer import (
 )
 from src.excel.state_manager import (
     crear_excel_trabajo_pendientes,
-    actualizar_estado_orden,
     obtener_fila_excel_por_id,
-    actualizar_resultado_orden,
+)
+from src.excel.pending_sync import (
+    aplicar_actualizaciones_pendientes_a_snapshot,
+    persistir_o_encolar_resultado,
+    sincronizar_actualizaciones_pendientes,
 )
 from src.flows.inicio_cotizacion import iniciar_cotizacion_con_texto
 from src.flows.proveedor import seleccionar_proveedor_por_codigo
@@ -86,6 +89,64 @@ def _emitir(callback: EventCallback | None, tipo: str, **datos: Any) -> None:
         callback(evento)
     except Exception:
         pass
+
+
+
+def _persistir_resultado_excel(
+    ruta_excel: Path,
+    id_orden: Any,
+    *,
+    estado_rpa: int,
+    resumen: str | None,
+):
+    """
+    Persiste el resultado de una orden sin convertir un fallo
+    de Excel en un fallo del portal CBN.
+
+    Si el Excel no puede escribirse, pending_sync conserva
+    el resultado en el journal persistente.
+    """
+    resultado = persistir_o_encolar_resultado(
+        ruta_excel,
+        id_orden,
+        estado_rpa=estado_rpa,
+        resumen=resumen,
+    )
+
+    if resultado.aplicado:
+        print(
+            f"Excel actualizado para "
+            f"ID_ORDEN={id_orden}."
+        )
+
+    elif resultado.encolado:
+        print(
+            f"[PENDIENTE EXCEL] "
+            f"ID_ORDEN={id_orden}. "
+            f"El resultado CBN qued? protegido "
+            f"en el journal persistente."
+        )
+
+        if resultado.ruta_journal:
+            print(
+                f"Journal: "
+                f"{resultado.ruta_journal}"
+            )
+
+    else:
+        print(
+            f"[ADVERTENCIA CRITICA] "
+            f"ID_ORDEN={id_orden}: "
+            f"CBN ya termin? la operaci?n, "
+            f"pero no se pudo persistir "
+            f"ni en Excel ni en el journal."
+        )
+
+        print(
+            f"Detalle: {resultado.detalle}"
+        )
+
+    return resultado
 
 
 def validar_archivo_excel(ruta_excel: str | Path) -> Path:
@@ -430,10 +491,43 @@ def ejecutar_rpa(
 
     with capturar_salida_ejecucion(directorio, callback) as ruta_log:
         try:
+            sincronizacion_inicio = sincronizar_actualizaciones_pendientes(
+                ruta_excel,
+            )
+
+            if sincronizacion_inicio["total"]:
+                print(
+                    "Sincronizaci?n inicial Excel: "
+                    f"{sincronizacion_inicio['aplicadas']} "
+                    "aplicada(s), "
+                    f"{sincronizacion_inicio['restantes']} "
+                    "pendiente(s)."
+                )
+
             metadata_entrada = crear_snapshot_estable(
                 ruta_excel,
                 entrada_original,
             )
+
+            overlay_pendientes = aplicar_actualizaciones_pendientes_a_snapshot(
+                entrada_original,
+                ruta_excel,
+            )
+
+            if overlay_pendientes["fallidas"]:
+                raise RuntimeError(
+                    "No se pudo aplicar completamente "
+                    "el journal pendiente al snapshot. "
+                    "Se detiene la ejecuci?n para evitar "
+                    "reprocesar ?rdenes ya ejecutadas en CBN."
+                )
+
+            if overlay_pendientes["total"]:
+                print(
+                    f"Overlay journal aplicado al snapshot: "
+                    f"{overlay_pendientes['aplicadas']} "
+                    "orden(es)."
+                )
 
             metadata_entrada["tipo"] = "excel_principal"
 
@@ -604,7 +698,7 @@ def ejecutar_rpa(
                             )
                             resultados.append(resultado_ok)
 
-                            actualizar_resultado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
                                 estado_rpa=1,
@@ -663,10 +757,11 @@ def ejecutar_rpa(
                                 resultado_error["PASO_ERROR"] = "navegador_cerrado"
 
                             resultados.append(resultado_error)
-                            actualizar_estado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
-                                2,
+                                estado_rpa=2,
+                                resumen=None,
                             )
 
                             _emitir(
@@ -733,10 +828,11 @@ def ejecutar_rpa(
                                 resultado_error["PASO_ERROR"] = "navegador_cerrado"
 
                             resultados.append(resultado_error)
-                            actualizar_estado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
-                                2,
+                                estado_rpa=2,
+                                resumen=None,
                             )
 
                             _emitir(
@@ -778,6 +874,29 @@ def ejecutar_rpa(
                     if estado_final != "CANCELADA":
                         estado_final = "COMPLETADA"
                         mensaje_final = "Ejecución terminada."
+
+            try:
+                sincronizacion_final = sincronizar_actualizaciones_pendientes(
+                    ruta_excel,
+                )
+
+                if sincronizacion_final["total"]:
+                    print(
+                        "Sincronizaci?n final Excel: "
+                        f"{sincronizacion_final['aplicadas']} "
+                        "aplicada(s), "
+                        f"{sincronizacion_final['restantes']} "
+                        "pendiente(s)."
+                    )
+
+            except Exception as error_sync_final:
+                print(
+                    "[ADVERTENCIA] No se pudo completar "
+                    "la sincronizaci?n final del Excel."
+                )
+                print(
+                    f"Detalle: {error_sync_final}"
+                )
 
             if resultados:
                 ruta_resultado = guardar_resultados_ordenes(
