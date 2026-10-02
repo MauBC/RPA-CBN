@@ -553,21 +553,228 @@ def test_cp13_baseline_versiones_abren_snapshot_una_vez(
     ] == 1
 
 
-def test_cp13_runner_aun_usa_preparacion_con_escritura():
+def test_cp13_runner_usa_preparacion_readonly():
     """
-    Documenta el punto exacto que CP13B.2 pretende cambiar.
+    CP13B.2: el snapshot de entrada ya no debe reescribirse
+    únicamente para identificar órdenes pendientes.
     """
     codigo = inspect.getsource(
         runner.ejecutar_rpa
     )
 
     assert (
-        "crear_excel_trabajo_pendientes(entrada_original)"
+        "crear_excel_trabajo_pendientes("
         in codigo
     )
 
     assert (
-        "crear_excel_trabajo_pendientes("
-        "entrada_original, solo_lectura=True)"
+        "solo_lectura=True"
+        in codigo
+    )
+
+    assert (
+        "crear_excel_trabajo_pendientes(entrada_original)"
         not in codigo
+    )
+
+
+
+def test_cp13_readonly_no_modifica_snapshot_sin_estado(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Un snapshot que todavía no contiene ESTADO_RPA debe poder
+    inspeccionarse como pendiente sin modificar físicamente
+    el archivo.
+    """
+    excel = (
+        tmp_path
+        / "entrada_sin_estado.xlsx"
+    )
+
+    wb = Workbook()
+
+    try:
+        ws = wb.active
+        ws.title = "Ordenes"
+
+        ws.append(
+            [
+                "ID_ORDEN",
+                "RESUMEN",
+                "DATO_NEGOCIO",
+            ]
+        )
+
+        ws.append(
+            [
+                "1001",
+                "",
+                "A",
+            ]
+        )
+
+        ws.append(
+            [
+                "1002",
+                "",
+                "B",
+            ]
+        )
+
+        adjuntos = wb.create_sheet(
+            "Adjuntos"
+        )
+
+        adjuntos.append(
+            [
+                "ID_ORDEN",
+                "ARCHIVO",
+            ]
+        )
+
+        adjuntos.append(
+            [
+                "1001",
+                "documento.pdf",
+            ]
+        )
+
+        wb.save(
+            excel
+        )
+
+    finally:
+        wb.close()
+
+    temporal = (
+        tmp_path
+        / "temporales"
+    )
+
+    monkeypatch.setattr(
+        state_manager,
+        "obtener_directorio_temporal",
+        lambda: temporal,
+    )
+
+    contenido_antes = (
+        excel.read_bytes()
+    )
+
+    ruta_trabajo, pendientes = (
+        state_manager.crear_excel_trabajo_pendientes(
+            excel,
+            solo_lectura=True,
+        )
+    )
+
+    contenido_despues = (
+        excel.read_bytes()
+    )
+
+    assert ruta_trabajo.exists()
+
+    assert [
+        pendiente.id_orden
+        for pendiente in pendientes
+    ] == [
+        "1001",
+        "1002",
+    ]
+
+    # Garantía fuerte:
+    # el XLSX original queda byte-a-byte idéntico.
+    assert (
+        contenido_despues
+        == contenido_antes
+    )
+
+
+def test_cp13_readonly_respeta_estados_existentes(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    La optimización no debe convertir en pendiente una orden
+    cuyo ESTADO_RPA ya indica que fue procesada.
+    """
+    excel = (
+        tmp_path
+        / "entrada_estados.xlsx"
+    )
+
+    wb = Workbook()
+
+    try:
+        ws = wb.active
+        ws.title = "Ordenes"
+
+        ws.append(
+            [
+                "ID_ORDEN",
+                "ESTADO_RPA",
+                "RESUMEN",
+                "DATO_NEGOCIO",
+            ]
+        )
+
+        ws.append(
+            [
+                "1001",
+                0,
+                "",
+                "PENDIENTE",
+            ]
+        )
+
+        ws.append(
+            [
+                "1002",
+                1,
+                "OK",
+                "PROCESADA",
+            ]
+        )
+
+        wb.save(
+            excel
+        )
+
+    finally:
+        wb.close()
+
+    temporal = (
+        tmp_path
+        / "temporales"
+    )
+
+    monkeypatch.setattr(
+        state_manager,
+        "obtener_directorio_temporal",
+        lambda: temporal,
+    )
+
+    contenido_antes = (
+        excel.read_bytes()
+    )
+
+    _, pendientes = (
+        state_manager.crear_excel_trabajo_pendientes(
+            excel,
+            solo_lectura=True,
+        )
+    )
+
+    assert [
+        pendiente.id_orden
+        for pendiente in pendientes
+    ] == [
+        "1001",
+    ]
+
+    assert (
+        excel.read_bytes()
+        == contenido_antes
     )

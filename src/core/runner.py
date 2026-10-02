@@ -714,7 +714,12 @@ def ejecutar_rpa(
             _emitir(callback, "validation_started", excel=str(ruta_excel))
             print("Leyendo y validando Excel...")
 
-            ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(entrada_original)
+            ruta_trabajo, pendientes = (
+                crear_excel_trabajo_pendientes(
+                    entrada_original,
+                    solo_lectura=True,
+                )
+            )
 
             filas_excel_por_id = (
                 _indexar_filas_pendientes(
