@@ -450,7 +450,7 @@ def obtener_estado_sincronizacion_excel(
                 _texto_cantidad(
                     inflight,
                     "orden en ejecuci\u00f3n incierta",
-                    "ordenes en ejecuci\u00f3n incierta",
+                    "órdenes en ejecuci\u00f3n incierta",
                 )
             )
 

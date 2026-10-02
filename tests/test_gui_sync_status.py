@@ -264,3 +264,41 @@ def test_cp13_gui_limita_ids_para_no_saturar_interfaz():
         "(+3 más)"
         in texto
     )
+
+
+
+def test_cp13_gui_revision_advierte_no_reprocesar():
+    resultado = _resultado_cp13_gui(
+        estado=(
+            EstadoSincronizacionExcel.REQUIERE_REVISION
+        ),
+        mensaje="1 actualización requiere revisión",
+        fallidas=1,
+        incidencias=(
+            IncidenciaSincronizacionExcel(
+                tipo=(
+                    TipoIncidenciaSincronizacion.FALLIDA
+                ),
+                id_orden="9001",
+                codigo="DATOS_EXCEL_INVALIDOS",
+                motivo="Cambio humano detectado.",
+                reintento_automatico=False,
+            ),
+        ),
+    )
+
+    texto = (
+        _texto_estado_sincronizacion_gui(
+            resultado
+        )
+    )
+
+    assert (
+        "Revisión manual: 9001."
+        in texto
+    )
+
+    assert (
+        "No reprocesar automáticamente"
+        in texto
+    )

@@ -472,3 +472,30 @@ def test_cp13_journal_sin_inflight_mantiene_compatibilidad(
         resultado.incidencias[0].tipo
         == TipoIncidenciaSincronizacion.PENDIENTE
     )
+
+
+
+def test_cp13_plural_inflight_usa_ordenes_con_tilde(
+    tmp_path,
+    monkeypatch,
+):
+    ruta = _configurar(
+        monkeypatch,
+        tmp_path,
+        estado_acceso=(
+            EstadoAccesoExcel.DISPONIBLE
+        ),
+        puede_escribir=True,
+        inflight=2,
+    )
+
+    resultado = (
+        obtener_estado_sincronizacion_excel(
+            ruta
+        )
+    )
+
+    assert (
+        "2 órdenes en ejecución incierta"
+        in resultado.mensaje
+    )

@@ -228,7 +228,8 @@ def _texto_estado_sincronizacion_gui(
     if ids_fallidas:
         lineas.append(
             "Revisión manual: "
-            f"{ids_fallidas}."
+            f"{ids_fallidas}. "
+            "No reprocesar automáticamente estas órdenes."
         )
 
     if (

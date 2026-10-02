@@ -93,6 +93,112 @@ def _mensaje_error_fatal(
     )
 
 
+def _ids_revision_overlay(
+    overlay: dict[str, Any],
+    *,
+    limite: int = 5,
+) -> str:
+    """
+    Resume los ID_ORDEN que requieren intervención humana.
+
+    El overlay ya contiene esta evidencia; aquí únicamente se
+    prepara para mostrarla al operador sin saturar el mensaje.
+    """
+    ids: list[str] = []
+
+    estados_revision = {
+        "FAILED_UPDATE_REQUIERE_REVISION",
+        "INFLIGHT_OVERLAY_ERROR",
+    }
+
+    for detalle in overlay.get(
+        "detalles",
+        [],
+    ):
+        if not isinstance(
+            detalle,
+            dict,
+        ):
+            continue
+
+        if str(
+            detalle.get(
+                "estado",
+                "",
+            )
+        ) not in estados_revision:
+            continue
+
+        id_orden = str(
+            detalle.get(
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if (
+            id_orden
+            and id_orden not in ids
+        ):
+            ids.append(
+                id_orden
+            )
+
+    if not ids:
+        return ""
+
+    visibles = ids[
+        :limite
+    ]
+
+    resultado = ", ".join(
+        visibles
+    )
+
+    restantes = (
+        len(ids)
+        - len(visibles)
+    )
+
+    if restantes > 0:
+        resultado += (
+            f" (+{restantes} más)"
+        )
+
+    return resultado
+
+
+def _mensaje_bloqueo_sincronizacion(
+    overlay: dict[str, Any],
+) -> str:
+    """
+    Mensaje accionable cuando existe riesgo de reprocesar una
+    operación cuyo resultado en CBN puede existir.
+    """
+    mensaje = (
+        "Se requiere revisión manual antes de volver a "
+        "ejecutar el RPA para evitar reprocesar órdenes "
+        "cuyo resultado en CBN ya puede existir."
+    )
+
+    ids = _ids_revision_overlay(
+        overlay
+    )
+
+    if ids:
+        mensaje += (
+            f" Órdenes afectadas: {ids}."
+        )
+
+    mensaje += (
+        " No reprocesar automáticamente estas órdenes "
+        "hasta resolver su estado de sincronización."
+    )
+
+    return mensaje
+
+
 @dataclass
 class ResultadoEjecucion:
     estado: str
@@ -672,11 +778,9 @@ def ejecutar_rpa(
 
             if overlay_pendientes["fallidas"]:
                 raise SincronizacionExcelRequiereRevisionError(
-                    "Existen actualizaciones de Excel que "
-                    "no pueden resolverse automáticamente. "
-                    "Se requiere revisión manual antes de "
-                    "volver a ejecutar el RPA para evitar "
-                    "reprocesar órdenes ya ejecutadas en CBN."
+                    _mensaje_bloqueo_sincronizacion(
+                        overlay_pendientes
+                    )
                 )
 
             if overlay_pendientes["total"]:

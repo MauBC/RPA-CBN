@@ -128,17 +128,7 @@ def test_runner_bloquea_overlay_fallido_antes_de_abrir_navegador():
     )
 
     assert (
-        "revisión manual"
-        in codigo
-    )
-
-    assert (
-        "evitar "
-        in codigo
-    )
-
-    assert (
-        "reprocesar órdenes"
+        "_mensaje_bloqueo_sincronizacion("
         in codigo
     )
 
@@ -146,7 +136,7 @@ def test_runner_bloquea_overlay_fallido_antes_de_abrir_navegador():
 def test_mensaje_fatal_preserva_bloqueo_de_sincronizacion():
     mensaje = (
         "Se requiere revisión manual para evitar "
-        "reprocesar ?rdenes ya ejecutadas en CBN."
+        "reprocesar órdenes ya ejecutadas en CBN."
     )
 
     error = (
@@ -161,3 +151,68 @@ def test_mensaje_fatal_preserva_bloqueo_de_sincronizacion():
         )
         == mensaje
     )
+
+
+
+def test_cp13_mensaje_revision_incluye_ids_afectados():
+    overlay = {
+        "fallidas": 2,
+        "detalles": [
+            {
+                "id_orden": "1001",
+                "estado": (
+                    "FAILED_UPDATE_REQUIERE_REVISION"
+                ),
+                "detalle": "Cambio humano.",
+            },
+            {
+                "id_orden": "1002",
+                "estado": (
+                    "INFLIGHT_OVERLAY_ERROR"
+                ),
+                "detalle": "No se pudo aplicar overlay.",
+            },
+        ],
+    }
+
+    mensaje = (
+        runner._mensaje_bloqueo_sincronizacion(
+            overlay
+        )
+    )
+
+    assert "revisión manual" in mensaje
+    assert "1001" in mensaje
+    assert "1002" in mensaje
+
+    assert (
+        "No reprocesar automáticamente"
+        in mensaje
+    )
+
+
+def test_cp13_mensaje_revision_limita_ids():
+    overlay = {
+        "detalles": [
+            {
+                "id_orden": str(
+                    1000 + indice
+                ),
+                "estado": (
+                    "FAILED_UPDATE_REQUIERE_REVISION"
+                ),
+            }
+            for indice in range(7)
+        ],
+    }
+
+    mensaje = (
+        runner._mensaje_bloqueo_sincronizacion(
+            overlay
+        )
+    )
+
+    assert "1000" in mensaje
+    assert "1004" in mensaje
+    assert "1005" not in mensaje
+    assert "(+2 más)" in mensaje
