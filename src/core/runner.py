@@ -22,6 +22,9 @@ from src.excel.snapshot_manager import (
     crear_snapshot_estable,
     guardar_manifest_snapshots,
 )
+from src.excel.concurrency_guard import (
+    capturar_versiones_ordenes,
+)
 from src.excel.validators import ValidacionExcelError
 from src.excel.result_writer import (
     guardar_resultado_error_validacion,
@@ -29,9 +32,14 @@ from src.excel.result_writer import (
 )
 from src.excel.state_manager import (
     crear_excel_trabajo_pendientes,
-    actualizar_estado_orden,
     obtener_fila_excel_por_id,
-    actualizar_resultado_orden,
+)
+from src.excel.pending_sync import (
+    registrar_orden_inflight,
+    cerrar_orden_inflight,
+    aplicar_actualizaciones_pendientes_a_snapshot,
+    persistir_o_encolar_resultado,
+    sincronizar_actualizaciones_pendientes,
 )
 from src.flows.inicio_cotizacion import iniciar_cotizacion_con_texto
 from src.flows.proveedor import seleccionar_proveedor_por_codigo
@@ -56,6 +64,33 @@ from src.utils.user_errors import construir_mensaje_usuario, construir_detalle_t
 
 
 EventCallback = Callable[[dict[str, Any]], None]
+
+
+class SincronizacionExcelRequiereRevisionError(RuntimeError):
+    """
+    Bloquea la ejecución cuando existe evidencia persistente
+    de una operación CBN que no pudo reconciliarse con Excel.
+
+    No debe ocultarse detrás del mensaje genérico de error,
+    porque el usuario necesita saber que NO debe reintentar
+    automáticamente la orden.
+    """
+    pass
+
+
+def _mensaje_error_fatal(
+    error: Exception,
+) -> str:
+    if isinstance(
+        error,
+        SincronizacionExcelRequiereRevisionError,
+    ):
+        return str(error)
+
+    return construir_mensaje_usuario(
+        error,
+        None,
+    )
 
 
 @dataclass
@@ -86,6 +121,112 @@ def _emitir(callback: EventCallback | None, tipo: str, **datos: Any) -> None:
         callback(evento)
     except Exception:
         pass
+
+
+
+def _persistir_resultado_excel(
+    ruta_excel: Path,
+    id_orden: Any,
+    *,
+    estado_rpa: int,
+    resumen: str | None,
+    version_esperada: dict[str, Any] | None = None,
+    inflight_id: str | None = None,
+):
+    """
+    Persiste el resultado de una orden sin convertir un fallo
+    de Excel en un fallo del portal CBN.
+
+    Si el Excel no puede escribirse, pending_sync conserva
+    el resultado en el journal persistente.
+    """
+    resultado = persistir_o_encolar_resultado(
+        ruta_excel,
+        id_orden,
+        estado_rpa=estado_rpa,
+        resumen=resumen,
+        version_esperada=version_esperada,
+    )
+
+    if (
+        inflight_id
+        and (
+            resultado.aplicado
+            or resultado.ruta_journal is not None
+        )
+    ):
+        try:
+            cerrado = cerrar_orden_inflight(
+                ruta_excel,
+                id_orden,
+                inflight_id,
+            )
+
+            if not cerrado:
+                print(
+                    "[ADVERTENCIA] No se pudo confirmar "
+                    "el cierre de inflight para "
+                    f"ID_ORDEN={id_orden}."
+                )
+
+        except Exception as error_inflight:
+            # Conservador: si el resultado ya es durable
+            # pero no podemos limpiar inflight, dejamos
+            # la marca para impedir un reprocesamiento.
+            print(
+                "[ADVERTENCIA] Resultado durable, pero "
+                "no se pudo limpiar inflight para "
+                f"ID_ORDEN={id_orden}: "
+                f"{error_inflight}"
+            )
+
+    if resultado.aplicado:
+        print(
+            f"Excel actualizado para "
+            f"ID_ORDEN={id_orden}."
+        )
+
+    elif resultado.encolado:
+        print(
+            f"[PENDIENTE EXCEL] "
+            f"ID_ORDEN={id_orden}. "
+            f"El resultado CBN quedó protegido "
+            f"en el journal persistente."
+        )
+
+        if resultado.ruta_journal:
+            print(
+                f"Journal: "
+                f"{resultado.ruta_journal}"
+            )
+
+    elif resultado.ruta_journal:
+        print(
+            f"[REQUIERE REVISION EXCEL] "
+            f"ID_ORDEN={id_orden}. "
+            f"CBN ya terminó la operación y el resultado "
+            f"quedó protegido en failed_updates. "
+            f"No debe reprocesarse automáticamente."
+        )
+
+        print(
+            f"Journal: {resultado.ruta_journal}"
+        )
+
+    else:
+        print(
+            f"[ADVERTENCIA CRITICA] "
+            f"ID_ORDEN={id_orden}: "
+            f"CBN ya terminó la operación, "
+            f"pero no se pudo persistir "
+            f"ni en Excel ni en el journal."
+        )
+
+        print(
+            f"Detalle: {resultado.detalle}"
+        )
+
+    return resultado
 
 
 def validar_archivo_excel(ruta_excel: str | Path) -> Path:
@@ -246,16 +387,85 @@ def procesar_orden(
     return info_panel, resumen
 
 
+def _indexar_filas_pendientes(
+    pendientes: list[Any],
+) -> dict[str, int]:
+    """
+    Construye una caché ID_ORDEN -> primera fila real del Excel.
+
+    PendienteRPA ya contiene fila_excel, así que no es necesario
+    volver a abrir y recorrer DATA.xlsx durante cada orden.
+    """
+    indice: dict[str, int] = {}
+
+    for pendiente in pendientes:
+        id_orden = str(
+            getattr(
+                pendiente,
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        fila = getattr(
+            pendiente,
+            "fila_excel",
+            None,
+        )
+
+        if (
+            not id_orden
+            or fila is None
+        ):
+            continue
+
+        indice[id_orden] = int(fila)
+
+    return indice
+
+
+def _resolver_fila_excel_resultado(
+    ruta_excel: Path,
+    id_orden: Any,
+    fila_excel: int | None,
+) -> int | str:
+    """
+    Ruta rápida:
+        usa la fila obtenida al calcular pendientes.
+
+    Fallback:
+        conserva la búsqueda histórica para llamadas externas
+        que no proporcionen fila_excel.
+    """
+    if fila_excel is not None:
+        return int(fila_excel)
+
+    return (
+        obtener_fila_excel_por_id(
+            ruta_excel,
+            id_orden,
+        )
+        or ""
+    )
+
+
 def construir_resultado_ok(
     indice: int,
     orden,
     ruta_excel: Path,
     info_panel=None,
+    *,
+    fila_excel: int | None = None,
 ) -> dict[str, Any]:
     return {
         "NRO": indice,
         "ID_ORDEN": orden.id_orden,
-        "FILA_EXCEL": obtener_fila_excel_por_id(ruta_excel, orden.id_orden) or "",
+        "FILA_EXCEL": _resolver_fila_excel_resultado(
+            ruta_excel,
+            orden.id_orden,
+            fila_excel,
+        ),
         "ESTADO": "OK",
         "N_COTIZACION": getattr(info_panel, "numero_cotizacion", ""),
         "ESTADO_CBN": getattr(info_panel, "estado_cbn", ""),
@@ -275,14 +485,21 @@ def construir_resultado_error(
     ruta_excel: Path,
     error: Exception,
     rutas: dict,
+    *,
+    fila_excel: int | None = None,
 ) -> dict[str, Any]:
     return {
         "NRO": indice,
         "ID_ORDEN": getattr(orden, "id_orden", ""),
-        "FILA_EXCEL": obtener_fila_excel_por_id(
+        "FILA_EXCEL": _resolver_fila_excel_resultado(
             ruta_excel,
-            getattr(orden, "id_orden", ""),
-        ) or "",
+            getattr(
+                orden,
+                "id_orden",
+                "",
+            ),
+            fila_excel,
+        ),
         "ESTADO": "ERROR",
         "N_COTIZACION": "",
         "ESTADO_CBN": "",
@@ -430,10 +647,44 @@ def ejecutar_rpa(
 
     with capturar_salida_ejecucion(directorio, callback) as ruta_log:
         try:
+            sincronizacion_inicio = sincronizar_actualizaciones_pendientes(
+                ruta_excel,
+            )
+
+            if sincronizacion_inicio["total"]:
+                print(
+                    "Sincronización inicial Excel: "
+                    f"{sincronizacion_inicio['aplicadas']} "
+                    "aplicada(s), "
+                    f"{sincronizacion_inicio['restantes']} "
+                    "pendiente(s)."
+                )
+
             metadata_entrada = crear_snapshot_estable(
                 ruta_excel,
                 entrada_original,
             )
+
+            overlay_pendientes = aplicar_actualizaciones_pendientes_a_snapshot(
+                entrada_original,
+                ruta_excel,
+            )
+
+            if overlay_pendientes["fallidas"]:
+                raise SincronizacionExcelRequiereRevisionError(
+                    "Existen actualizaciones de Excel que "
+                    "no pueden resolverse automáticamente. "
+                    "Se requiere revisión manual antes de "
+                    "volver a ejecutar el RPA para evitar "
+                    "reprocesar órdenes ya ejecutadas en CBN."
+                )
+
+            if overlay_pendientes["total"]:
+                print(
+                    f"Overlay journal aplicado al snapshot: "
+                    f"{overlay_pendientes['aplicadas']} "
+                    "orden(es)."
+                )
 
             metadata_entrada["tipo"] = "excel_principal"
 
@@ -465,6 +716,23 @@ def ejecutar_rpa(
 
             ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(entrada_original)
 
+            filas_excel_por_id = (
+                _indexar_filas_pendientes(
+                    pendientes
+                )
+            )
+
+            versiones_excel_por_id = (
+                capturar_versiones_ordenes(
+                    entrada_original,
+                    [
+                        pendiente.id_orden
+                        for pendiente
+                        in pendientes
+                    ],
+                )
+            )
+
             if not pendientes:
                 estado_final = "SIN_PENDIENTES"
                 mensaje_final = "No hay órdenes pendientes con ESTADO_RPA = 0."
@@ -479,7 +747,7 @@ def ejecutar_rpa(
                 )
 
                 # Validamos otra vez, pero ahora exactamente sobre
-                # los templates congelados que utilizar? esta ejecuci?n.
+                # los templates congelados que utilizará esta ejecución.
                 validar_ordenes_cargadas(
                     ordenes
                 )
@@ -497,7 +765,7 @@ def ejecutar_rpa(
 
                 print(
                     f"Templates congelados correctamente: "
-                    f"{len(metadata_templates)} archivo(s) ?nico(s)."
+                    f"{len(metadata_templates)} archivo(s) único(s)."
                 )
 
                 if not ordenes:
@@ -563,6 +831,18 @@ def ejecutar_rpa(
                     _emitir(callback, "login_ok", message="Sesión de CBN lista.")
 
                     for indice, orden in enumerate(ordenes, start=1):
+                        fila_excel_orden = (
+                            filas_excel_por_id.get(
+                                str(orden.id_orden)
+                            )
+                        )
+
+                        version_excel_orden = (
+                            versiones_excel_por_id.get(
+                                str(orden.id_orden)
+                            )
+                        )
+
                         if cancelar_evento.is_set():
                             estado_final = "CANCELADA"
                             mensaje_final = (
@@ -581,10 +861,23 @@ def ejecutar_rpa(
                             message=f"Procesando orden {indice} de {total}",
                         )
 
+                        inflight_id_orden = (
+                            registrar_orden_inflight(
+                                ruta_excel,
+                                orden.id_orden,
+                                version_esperada=version_excel_orden,
+                            )
+                        )
+
+                        print(
+                            f"Inflight registrado para "
+                            f"ID_ORDEN={orden.id_orden}."
+                        )
+
                         try:
                             print(
                                 f"Fila Excel: "
-                                f"{obtener_fila_excel_por_id(ruta_excel, orden.id_orden)}"
+                                f"{fila_excel_orden}"
                             )
 
                             info_panel, resumen_orden = procesar_orden(
@@ -601,14 +894,17 @@ def ejecutar_rpa(
                                 orden,
                                 ruta_excel,
                                 info_panel,
+                                fila_excel=fila_excel_orden,
                             )
                             resultados.append(resultado_ok)
 
-                            actualizar_resultado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
                                 estado_rpa=1,
                                 resumen=resumen_orden,
+                                version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             print(
@@ -656,6 +952,7 @@ def ejecutar_rpa(
                                 ruta_excel,
                                 error,
                                 rutas,
+                                fila_excel=fila_excel_orden,
                             )
                             resultado_error["MENSAJE_USUARIO"] = mensaje_usuario
 
@@ -663,10 +960,13 @@ def ejecutar_rpa(
                                 resultado_error["PASO_ERROR"] = "navegador_cerrado"
 
                             resultados.append(resultado_error)
-                            actualizar_estado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
-                                2,
+                                estado_rpa=2,
+                                resumen=None,
+                                version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             _emitir(
@@ -726,6 +1026,7 @@ def ejecutar_rpa(
                                 ruta_excel,
                                 error,
                                 rutas,
+                                fila_excel=fila_excel_orden,
                             )
                             resultado_error["MENSAJE_USUARIO"] = mensaje_usuario
 
@@ -733,10 +1034,13 @@ def ejecutar_rpa(
                                 resultado_error["PASO_ERROR"] = "navegador_cerrado"
 
                             resultados.append(resultado_error)
-                            actualizar_estado_orden(
+                            _persistir_resultado_excel(
                                 ruta_excel,
                                 orden.id_orden,
-                                2,
+                                estado_rpa=2,
+                                resumen=None,
+                                version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             _emitir(
@@ -778,6 +1082,29 @@ def ejecutar_rpa(
                     if estado_final != "CANCELADA":
                         estado_final = "COMPLETADA"
                         mensaje_final = "Ejecución terminada."
+
+            try:
+                sincronizacion_final = sincronizar_actualizaciones_pendientes(
+                    ruta_excel,
+                )
+
+                if sincronizacion_final["total"]:
+                    print(
+                        "Sincronización final Excel: "
+                        f"{sincronizacion_final['aplicadas']} "
+                        "aplicada(s), "
+                        f"{sincronizacion_final['restantes']} "
+                        "pendiente(s)."
+                    )
+
+            except Exception as error_sync_final:
+                print(
+                    "[ADVERTENCIA] No se pudo completar "
+                    "la sincronización final del Excel."
+                )
+                print(
+                    f"Detalle: {error_sync_final}"
+                )
 
             if resultados:
                 ruta_resultado = guardar_resultados_ordenes(
@@ -893,7 +1220,9 @@ def ejecutar_rpa(
 
         except Exception as error:
             estado_final = "ERROR"
-            mensaje_final = construir_mensaje_usuario(error, None)
+            mensaje_final = _mensaje_error_fatal(
+                error
+            )
 
             rutas = guardar_evidencia_error(page, error, "error_app")
 

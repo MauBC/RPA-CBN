@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from openpyxl import Workbook, load_workbook
 import pytest
@@ -155,3 +155,117 @@ def test_guardado_atomico_el_temporal_es_excel_valido(
         )
     finally:
         wb_final.close()
+
+
+def test_guardado_cas_aplica_si_archivo_no_cambio(
+    tmp_path,
+):
+    from src.excel.excel_transaction import (
+        sha256_archivo_excel,
+    )
+
+    ruta = tmp_path / "DATA_CAS.xlsx"
+    _crear_excel(ruta)
+
+    sha = sha256_archivo_excel(
+        ruta
+    )
+
+    wb = load_workbook(
+        ruta
+    )
+
+    try:
+        wb["Ordenes"]["A2"] = "RPA"
+
+        guardar_workbook_atomico(
+            wb,
+            ruta,
+            sha256_esperado=sha,
+        )
+
+    finally:
+        wb.close()
+
+    verificacion = load_workbook(
+        ruta,
+        data_only=True,
+    )
+
+    try:
+        assert (
+            verificacion["Ordenes"]["A2"].value
+            == "RPA"
+        )
+    finally:
+        verificacion.close()
+
+
+def test_guardado_cas_no_pisa_cambio_externo(
+    tmp_path,
+):
+    from src.excel.excel_transaction import (
+        ExcelArchivoCambioConcurrenteError,
+        sha256_archivo_excel,
+    )
+
+    ruta = tmp_path / "DATA_CAS.xlsx"
+    _crear_excel(ruta)
+
+    sha = sha256_archivo_excel(
+        ruta
+    )
+
+    wb_rpa = load_workbook(
+        ruta
+    )
+
+    try:
+        wb_rpa["Ordenes"]["A2"] = (
+            "CAMBIO RPA"
+        )
+
+        # Otro actor modifica DATA.xlsx mientras
+        # nuestro workbook viejo continúa en memoria.
+        wb_humano = load_workbook(
+            ruta
+        )
+
+        try:
+            wb_humano["Ordenes"]["A2"] = (
+                "CAMBIO HUMANO"
+            )
+
+            wb_humano.save(
+                ruta
+            )
+
+        finally:
+            wb_humano.close()
+
+        with pytest.raises(
+            ExcelArchivoCambioConcurrenteError,
+        ):
+            guardar_workbook_atomico(
+                wb_rpa,
+                ruta,
+                sha256_esperado=sha,
+            )
+
+    finally:
+        wb_rpa.close()
+
+    verificacion = load_workbook(
+        ruta,
+        data_only=True,
+    )
+
+    try:
+        # El cambio externo debe sobrevivir.
+        assert (
+            verificacion["Ordenes"]["A2"].value
+            == "CAMBIO HUMANO"
+        )
+
+    finally:
+        verificacion.close()

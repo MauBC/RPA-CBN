@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
 import os
 import uuid
 import zipfile
@@ -43,8 +44,84 @@ class ExcelArchivoOcupadoError(ExcelPersistenciaError):
         super().__init__(mensaje)
 
 
+class ExcelArchivoCambioConcurrenteError(
+    ExcelPersistenciaError
+):
+    """
+    DATA.xlsx cambió después de cargar la versión
+    que el RPA pretende persistir.
+
+    Es recuperable: una nueva tentativa puede cargar
+    la versión más reciente y volver a validar la orden.
+    """
+
+    def __init__(
+        self,
+        ruta: str | Path,
+        sha256_esperado: str,
+        sha256_actual: str,
+    ) -> None:
+        self.ruta = Path(ruta)
+        self.sha256_esperado = str(
+            sha256_esperado
+        )
+        self.sha256_actual = str(
+            sha256_actual
+        )
+
+        super().__init__(
+            "El archivo Excel cambió durante "
+            "la operación de persistencia. "
+            f"Ruta={self.ruta}."
+        )
+
+
 class ExcelAccesoError(ExcelPersistenciaError):
     """Error no clasificado como bloqueo temporal."""
+
+
+def sha256_archivo_excel(
+    ruta_excel: str | Path,
+) -> str:
+    ruta = Path(
+        ruta_excel
+    )
+
+    digest = hashlib.sha256()
+
+    with ruta.open("rb") as archivo:
+        while True:
+            bloque = archivo.read(
+                1024 * 1024
+            )
+
+            if not bloque:
+                break
+
+            digest.update(
+                bloque
+            )
+
+    return digest.hexdigest()
+
+
+def _validar_sha256_esperado(
+    ruta_excel: str | Path,
+    sha256_esperado: str | None,
+) -> None:
+    if sha256_esperado is None:
+        return
+
+    actual = sha256_archivo_excel(
+        ruta_excel
+    )
+
+    if actual != sha256_esperado:
+        raise ExcelArchivoCambioConcurrenteError(
+            ruta_excel,
+            sha256_esperado,
+            actual,
+        )
 
 
 def exigir_excel_disponible(
@@ -144,6 +221,8 @@ def _validar_paquete_excel(
 def guardar_workbook_atomico(
     workbook: Any,
     ruta_excel: str | Path,
+    *,
+    sha256_esperado: str | None = None,
 ) -> None:
     """
     Persiste un Workbook sin escribir directamente sobre el original.
@@ -166,6 +245,11 @@ def guardar_workbook_atomico(
         ruta_excel
     )
 
+    _validar_sha256_esperado(
+        ruta_excel,
+        sha256_esperado,
+    )
+
     temporal = _ruta_temporal_excel(
         ruta_excel
     )
@@ -185,6 +269,14 @@ def guardar_workbook_atomico(
             os.fsync(
                 archivo.fileno()
             )
+
+        # Compare-and-swap lógico del archivo físico.
+        # Si DATA.xlsx cambió desde que lo cargamos,
+        # no sustituimos esa versión con nuestro workbook viejo.
+        _validar_sha256_esperado(
+            ruta_excel,
+            sha256_esperado,
+        )
 
         try:
             os.replace(

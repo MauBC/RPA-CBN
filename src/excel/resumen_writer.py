@@ -155,7 +155,7 @@ def actualizar_resumen_orden(
 
             if filas_actualizadas == 0:
                 raise ValueError(
-                    f"No se encontr? ID_ORDEN={id_orden_buscado} "
+                    f"No se encontró ID_ORDEN={id_orden_buscado} "
                     f"para actualizar RESUMEN."
                 )
 

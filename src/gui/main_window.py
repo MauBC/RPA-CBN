@@ -16,6 +16,11 @@ from PIL import Image
 
 from src.core.runner import ejecutar_rpa, validar_excel_sin_ejecutar
 from src.utils.app_config import cargar_configuracion, guardar_configuracion
+from src.excel.sync_status import (
+    EstadoSincronizacionExcel,
+    ResumenSincronizacionExcel,
+    obtener_estado_sincronizacion_excel,
+)
 from src.utils.app_paths import (
     obtener_directorio_app,
     obtener_directorio_perfil,
@@ -132,6 +137,33 @@ def _resumen_importes(ordenes: list[dict[str, Any]]) -> str:
     return " | ".join(partes)
 
 
+def _color_estado_sincronizacion(
+    estado: EstadoSincronizacionExcel,
+):
+    if (
+        estado
+        == EstadoSincronizacionExcel.SINCRONIZADO
+    ):
+        return (
+            "#2E7D32",
+            "#66BB6A",
+        )
+
+    if estado in {
+        EstadoSincronizacionExcel.EXCEL_OCUPADO,
+        EstadoSincronizacionExcel.PENDIENTE,
+    }:
+        return (
+            "#C66A00",
+            "#FFB74D",
+        )
+
+    return (
+        "#C62828",
+        "#EF5350",
+    )
+
+
 class VentanaPrincipal(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -182,12 +214,25 @@ class VentanaPrincipal(ctk.CTk):
         self._filas_tabla: dict[str, str] = {}
         self._datos_financieros: dict[str, tuple[str, str]] = {}
 
+        # CP9 - Estado independiente de sincronización Excel.
+        # La consulta se ejecuta fuera del hilo de Tkinter para que
+        # un lock temporal del journal nunca congele la interfaz.
+        self._consulta_sync_activa = False
+        self._intervalo_sync_ms = 2500
+
         self._config = cargar_configuracion()
 
         self._crear_interfaz()
         self._cargar_config_en_interfaz()
 
         self.after(100, self._procesar_cola)
+
+        # Primer diagnóstico poco después de mostrar la ventana.
+        self.after(
+            250,
+            self._ciclo_estado_sincronizacion_excel,
+        )
+
         self.protocol("WM_DELETE_WINDOW", self._cerrar_aplicacion)
 
     def _crear_interfaz(self) -> None:
@@ -275,6 +320,29 @@ class VentanaPrincipal(ctk.CTk):
         )
         self.selector_navegador.grid(
             row=0, column=4, padx=(8, 16), pady=14
+        )
+
+        self.etiqueta_sync_excel = ctk.CTkLabel(
+            configuracion,
+            text="Excel: sin archivo seleccionado.",
+            anchor="w",
+            font=ctk.CTkFont(
+                size=12,
+                weight="bold",
+            ),
+            text_color=(
+                "gray40",
+                "gray65",
+            ),
+        )
+
+        self.etiqueta_sync_excel.grid(
+            row=1,
+            column=1,
+            columnspan=4,
+            padx=(8, 16),
+            pady=(0, 10),
+            sticky="ew",
         )
 
         acciones = ctk.CTkFrame(self, fg_color="transparent")
@@ -448,7 +516,11 @@ class VentanaPrincipal(ctk.CTk):
         self.entrada_excel.delete(0, "end")
         self.entrada_excel.insert(0, ruta)
         self._guardar_config_actual()
-        self.etiqueta_estado.configure(text="Excel seleccionado. Puede validarlo.")
+        self.etiqueta_estado.configure(
+            text="Excel seleccionado. Puede validarlo."
+        )
+
+        self._consultar_estado_sincronizacion_excel()
 
     def _obtener_excel(self) -> Path | None:
         texto = self.entrada_excel.get().strip()
@@ -551,6 +623,102 @@ class VentanaPrincipal(ctk.CTk):
         self._hilo = Thread(target=trabajo, daemon=True)
         self._hilo.start()
 
+    def _consultar_estado_sincronizacion_excel(
+        self,
+    ) -> None:
+        """
+        Ejecuta un diagnóstico de solo lectura en segundo plano.
+
+        No sincroniza ni modifica DATA.xlsx.
+        """
+        if self._consulta_sync_activa:
+            return
+
+        ruta_texto = (
+            self.entrada_excel.get().strip()
+        )
+
+        if not ruta_texto:
+            self.etiqueta_sync_excel.configure(
+                text=(
+                    "Excel: sin archivo seleccionado."
+                ),
+                text_color=(
+                    "gray40",
+                    "gray65",
+                ),
+            )
+            return
+
+        self._consulta_sync_activa = True
+
+        def trabajo() -> None:
+            try:
+                resultado = (
+                    obtener_estado_sincronizacion_excel(
+                        ruta_texto
+                    )
+                )
+
+                self._cola.put(
+                    {
+                        "type": "excel_sync_status",
+                        "excel": ruta_texto,
+                        "result": resultado,
+                    }
+                )
+
+            except Exception as error:
+                self._cola.put(
+                    {
+                        "type": "excel_sync_status_error",
+                        "excel": ruta_texto,
+                        "message": str(error),
+                    }
+                )
+
+            finally:
+                self._cola.put(
+                    {
+                        "type": (
+                            "excel_sync_status_finished"
+                        ),
+                    }
+                )
+
+        Thread(
+            target=trabajo,
+            daemon=True,
+        ).start()
+
+    def _ciclo_estado_sincronizacion_excel(
+        self,
+    ) -> None:
+        """
+        Refresco periódico no bloqueante del indicador Excel.
+        """
+        self._consultar_estado_sincronizacion_excel()
+
+        self.after(
+            self._intervalo_sync_ms,
+            self._ciclo_estado_sincronizacion_excel,
+        )
+
+    def _mostrar_estado_sincronizacion_excel(
+        self,
+        resultado: ResumenSincronizacionExcel,
+    ) -> None:
+        color = _color_estado_sincronizacion(
+            resultado.estado
+        )
+
+        self.etiqueta_sync_excel.configure(
+            text=(
+                f"Excel: {resultado.mensaje}"
+            ),
+            text_color=color,
+        )
+
     def _solicitar_detencion(self) -> None:
         if not self._ejecutando:
             return
@@ -583,6 +751,64 @@ class VentanaPrincipal(ctk.CTk):
 
         if tipo == "log":
             self._agregar_log(str(evento.get("message", "")))
+            return
+
+        if tipo == "excel_sync_status":
+            ruta_evento = str(
+                evento.get(
+                    "excel",
+                    "",
+                )
+            )
+
+            ruta_actual = (
+                self.entrada_excel.get().strip()
+            )
+
+            # Evita mostrar un resultado viejo si el usuario
+            # seleccionó otro Excel mientras terminaba el hilo.
+            if ruta_evento == ruta_actual:
+                resultado = evento.get(
+                    "result"
+                )
+
+                if isinstance(
+                    resultado,
+                    ResumenSincronizacionExcel,
+                ):
+                    self._mostrar_estado_sincronizacion_excel(
+                        resultado
+                    )
+
+            return
+
+        if tipo == "excel_sync_status_error":
+            ruta_evento = str(
+                evento.get(
+                    "excel",
+                    "",
+                )
+            )
+
+            if (
+                ruta_evento
+                == self.entrada_excel.get().strip()
+            ):
+                self.etiqueta_sync_excel.configure(
+                    text=(
+                        "Excel: no se pudo consultar "
+                        "el estado de sincronización."
+                    ),
+                    text_color=(
+                        "#C62828",
+                        "#EF5350",
+                    ),
+                )
+
+            return
+
+        if tipo == "excel_sync_status_finished":
+            self._consulta_sync_activa = False
             return
 
         if tipo == "run_directory":
@@ -788,6 +1014,10 @@ class VentanaPrincipal(ctk.CTk):
 
         if estado == "COMPLETADA":
             self.barra_progreso.set(1)
+
+        # La ejecución pudo aplicar o generar nuevas entradas
+        # del journal. Actualizamos el indicador cuanto antes.
+        self._consultar_estado_sincronizacion_excel()
 
         if not resultado:
             messagebox.showerror(

@@ -12,8 +12,13 @@ from openpyxl import load_workbook
 
 from src.utils.app_paths import obtener_directorio_temporal
 from src.excel.excel_transaction import (
+    ExcelArchivoCambioConcurrenteError,
     exigir_excel_disponible,
     guardar_workbook_atomico,
+    sha256_archivo_excel,
+)
+from src.excel.concurrency_guard import (
+    validar_version_orden_workbook,
 )
 
 
@@ -208,6 +213,80 @@ def _excel_lock(ruta_excel: str | Path, timeout_segundos: int = 180):
             pass
 
 
+def _cargar_workbook_estable_para_actualizacion(
+    ruta_excel: str | Path,
+    *,
+    intentos: int = 3,
+) -> tuple[Any, str]:
+    """
+    Carga el workbook ?nicamente cuando DATA.xlsx
+    permanece idéntico durante toda la lectura.
+
+    Devuelve:
+        (workbook, sha256_version_cargada)
+    """
+    ruta_excel = Path(
+        ruta_excel
+    )
+
+    ultimo_sha_antes = ""
+    ultimo_sha_despues = ""
+
+    for intento in range(
+        1,
+        intentos + 1,
+    ):
+        exigir_excel_disponible(
+            ruta_excel
+        )
+
+        sha_antes = (
+            sha256_archivo_excel(
+                ruta_excel
+            )
+        )
+
+        wb = load_workbook(
+            ruta_excel
+        )
+
+        try:
+            sha_despues = (
+                sha256_archivo_excel(
+                    ruta_excel
+                )
+            )
+
+            if (
+                sha_antes
+                == sha_despues
+            ):
+                return (
+                    wb,
+                    sha_despues,
+                )
+
+        except Exception:
+            wb.close()
+            raise
+
+        wb.close()
+
+        ultimo_sha_antes = sha_antes
+        ultimo_sha_despues = sha_despues
+
+        if intento < intentos:
+            time.sleep(
+                0.05
+            )
+
+    raise ExcelArchivoCambioConcurrenteError(
+        ruta_excel,
+        ultimo_sha_antes,
+        ultimo_sha_despues,
+    )
+
+
 def _asegurar_columna_estado(ws) -> int:
     headers = _headers_ws(ws)
 
@@ -242,15 +321,18 @@ def _asegurar_columna_resumen(ws) -> int:
 
 def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
     """
-    ID_ORDEN repetidos est?n permitidos porque representan posiciones.
+    ID_ORDEN repetidos están permitidos porque representan posiciones.
 
     Todas las filas del mismo ID_ORDEN deben tener el mismo ESTADO_RPA.
     """
     ruta_excel = Path(ruta_excel)
 
     with _excel_lock(ruta_excel):
-        exigir_excel_disponible(ruta_excel)
-        wb = load_workbook(ruta_excel)
+        wb, sha256_cargado = (
+            _cargar_workbook_estable_para_actualizacion(
+                ruta_excel
+            )
+        )
 
         try:
             if HOJA_ORDENES not in wb.sheetnames:
@@ -314,7 +396,11 @@ def preparar_columna_estado_y_validar_ids(ruta_excel: str | Path) -> None:
                     + "\n".join(inconsistencias)
                 )
 
-            guardar_workbook_atomico(wb, ruta_excel)
+            guardar_workbook_atomico(
+                wb,
+                ruta_excel,
+                sha256_esperado=sha256_cargado,
+            )
 
         finally:
             wb.close()
@@ -324,7 +410,7 @@ def inspeccionar_pendientes(
     ruta_excel: str | Path,
 ) -> list[PendienteRPA]:
     """
-    Inspecciona las ?rdenes pendientes SIN modificar el Excel original.
+    Inspecciona las órdenes pendientes SIN modificar el Excel original.
 
     Reglas:
     - Si ESTADO_RPA no existe, se considera estado 0 en memoria.
@@ -380,8 +466,8 @@ def inspeccionar_pendientes(
                 continue
 
             if col_estado is None:
-                # ESTADO_RPA todav?a no existe.
-                # Durante VALIDACI?N lo simulamos como pendiente,
+                # ESTADO_RPA todavía no existe.
+                # Durante VALIDACIÓN lo simulamos como pendiente,
                 # sin modificar el workbook original.
                 estado = 0
             else:
@@ -522,9 +608,10 @@ def actualizar_resultado_orden(
     *,
     estado_rpa: int,
     resumen: str | None = None,
+    version_esperada: dict[str, Any] | None = None,
 ) -> int:
     """
-    Actualiza en una ?nica apertura/guardado los campos controlados
+    Actualiza en una única apertura/guardado los campos controlados
     por el RPA para todas las filas de un ID_ORDEN.
 
     - ESTADO_RPA siempre se actualiza.
@@ -546,7 +633,7 @@ def actualizar_resultado_orden(
 
     if not id_orden_buscado:
         raise ValueError(
-            "id_orden_buscado no puede estar vac?o."
+            "id_orden_buscado no puede estar vacío."
         )
 
     texto_resumen = (
@@ -556,8 +643,11 @@ def actualizar_resultado_orden(
     )
 
     with _excel_lock(ruta_excel):
-        exigir_excel_disponible(ruta_excel)
-        wb = load_workbook(ruta_excel)
+        wb, sha256_cargado = (
+            _cargar_workbook_estable_para_actualizacion(
+                ruta_excel
+            )
+        )
 
         try:
             if HOJA_ORDENES not in wb.sheetnames:
@@ -577,6 +667,15 @@ def actualizar_resultado_orden(
             col_id = headers[
                 COL_ID_ORDEN
             ]
+
+            if version_esperada is not None:
+                validar_version_orden_workbook(
+                    wb,
+                    id_orden_buscado,
+                    version_esperada,
+                    estado_objetivo=estado_rpa,
+                    resumen_objetivo=texto_resumen,
+                )
 
             col_estado = (
                 _asegurar_columna_estado(ws)
@@ -620,13 +719,17 @@ def actualizar_resultado_orden(
 
             if filas_actualizadas == 0:
                 raise ValueError(
-                    f"No se encontr? "
+                    f"No se encontró "
                     f"ID_ORDEN={id_orden_buscado} "
                     f"para actualizar resultado."
                 )
 
-            # ?NICO save de la operaci?n.
-            guardar_workbook_atomico(wb, ruta_excel)
+            # ÚNICO save de la operación.
+            guardar_workbook_atomico(
+                wb,
+                ruta_excel,
+                sha256_esperado=sha256_cargado,
+            )
 
         finally:
             wb.close()
@@ -658,8 +761,11 @@ def actualizar_estado_orden(
     id_orden_buscado = _normalizar_id(id_orden_buscado)
 
     with _excel_lock(ruta_excel):
-        exigir_excel_disponible(ruta_excel)
-        wb = load_workbook(ruta_excel)
+        wb, sha256_cargado = (
+            _cargar_workbook_estable_para_actualizacion(
+                ruta_excel
+            )
+        )
 
         try:
             if HOJA_ORDENES not in wb.sheetnames:
@@ -695,11 +801,15 @@ def actualizar_estado_orden(
 
             if filas_actualizadas == 0:
                 raise ValueError(
-                    f"No se encontr? ID_ORDEN={id_orden_buscado} "
+                    f"No se encontró ID_ORDEN={id_orden_buscado} "
                     f"para actualizar ESTADO_RPA."
                 )
 
-            guardar_workbook_atomico(wb, ruta_excel)
+            guardar_workbook_atomico(
+                wb,
+                ruta_excel,
+                sha256_esperado=sha256_cargado,
+            )
 
         finally:
             wb.close()
