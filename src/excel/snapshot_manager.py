@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 import hashlib
@@ -10,6 +11,9 @@ import os
 import shutil
 import time
 import uuid
+import zipfile
+
+from openpyxl import load_workbook
 
 from src.excel.validators import OrdenCotizacion
 
@@ -154,6 +158,394 @@ def crear_snapshot_estable(
     )
 
 
+
+def _quantity_or_percent_a_numero_excel(
+    valor: Any,
+    *,
+    contexto: str,
+) -> int | float:
+    """
+    Convierte quantityOrPercent al mismo valor numérico que
+    acepta actualmente el lector del RPA.
+
+    Es intencionalmente compatible con la semántica existente:
+    - espacios se ignoran;
+    - coma se interpreta como separador de miles;
+    - se redondea a 4 decimales con ROUND_HALF_UP;
+    - solo admite valores mayores a cero.
+    """
+    if valor is None:
+        raise SnapshotError(
+            f"{contexto}: quantityOrPercent vacío."
+        )
+
+    texto = str(
+        valor
+    ).strip()
+
+    if not texto:
+        raise SnapshotError(
+            f"{contexto}: quantityOrPercent vacío."
+        )
+
+    texto = texto.replace(
+        ",",
+        "",
+    )
+
+    try:
+        numero = Decimal(
+            texto
+        )
+    except InvalidOperation as exc:
+        raise SnapshotError(
+            f"{contexto}: quantityOrPercent "
+            f"no numérico: {valor!r}."
+        ) from exc
+
+    if (
+        not numero.is_finite()
+        or numero <= 0
+    ):
+        raise SnapshotError(
+            f"{contexto}: quantityOrPercent "
+            f"debe ser mayor a cero. "
+            f"Valor: {valor!r}."
+        )
+
+    numero = numero.quantize(
+        Decimal("0.0001"),
+        rounding=ROUND_HALF_UP,
+    )
+
+    entero = numero.to_integral_value()
+
+    if numero == entero:
+        return int(
+            entero
+        )
+
+    return float(
+        numero
+    )
+
+
+def normalizar_quantity_or_percent_snapshot(
+    ruta_template: str | Path,
+) -> dict[str, Any]:
+    """
+    Normaliza exclusivamente el TEMPLATE congelado que será
+    entregado al portal.
+
+    El archivo original del usuario nunca se modifica.
+
+    quantityOrPercent queda guardado físicamente como tipo
+    numérico de Excel, incluso cuando el origen contenía:
+        "300"
+        " 300 "
+        "300.00"
+        formato de celda "@"
+
+    Si existen fórmulas en quantityOrPercent, no reescribe el
+    workbook. Se conserva el comportamiento anterior para no
+    destruir valores calculados/caché de Excel.
+    """
+    ruta_template = Path(
+        ruta_template
+    ).resolve()
+
+    keep_vba = (
+        ruta_template.suffix.lower()
+        == ".xlsm"
+    )
+
+    try:
+        wb = load_workbook(
+            ruta_template,
+            read_only=False,
+            data_only=False,
+            keep_vba=keep_vba,
+        )
+    except Exception as exc:
+        raise SnapshotError(
+            "No se pudo abrir el TEMPLATE congelado "
+            f"para normalización: {ruta_template}"
+        ) from exc
+
+    temporal: Path | None = None
+
+    try:
+        if len(
+            wb.sheetnames
+        ) != 1:
+            raise SnapshotError(
+                "TEMPLATE congelado debe tener "
+                "exactamente una hoja. "
+                f"Archivo: {ruta_template}"
+            )
+
+        ws = wb[
+            wb.sheetnames[0]
+        ]
+
+        header_a = str(
+            ws["A1"].value
+            or ""
+        ).strip()
+
+        header_b = str(
+            ws["B1"].value
+            or ""
+        ).strip()
+
+        if (
+            header_a != "code"
+            or header_b
+            != "quantityOrPercent"
+        ):
+            raise SnapshotError(
+                "TEMPLATE congelado tiene cabeceras "
+                "inválidas. "
+                f"Archivo: {ruta_template}"
+            )
+
+        formulas = []
+
+        for fila in range(
+            3,
+            ws.max_row + 1,
+        ):
+            celda = ws.cell(
+                row=fila,
+                column=2,
+            )
+
+            if celda.data_type == "f":
+                formulas.append(
+                    fila
+                )
+
+        if formulas:
+            return {
+                "modificado": False,
+                "normalizadas": 0,
+                "formulas_omitidas": len(
+                    formulas
+                ),
+            }
+
+        normalizadas = 0
+
+        for fila in range(
+            3,
+            ws.max_row + 1,
+        ):
+            celda_codigo = ws.cell(
+                row=fila,
+                column=1,
+            )
+
+            celda_valor = ws.cell(
+                row=fila,
+                column=2,
+            )
+
+            codigo = celda_codigo.value
+            valor = celda_valor.value
+
+            codigo_vacio = (
+                codigo is None
+                or not str(
+                    codigo
+                ).strip()
+            )
+
+            valor_vacio = (
+                valor is None
+                or (
+                    isinstance(
+                        valor,
+                        str,
+                    )
+                    and not valor.strip()
+                )
+            )
+
+            if (
+                codigo_vacio
+                and valor_vacio
+            ):
+                continue
+
+            if valor_vacio:
+                raise SnapshotError(
+                    f"TEMPLATE {ruta_template}, "
+                    f"fila {fila}: "
+                    "quantityOrPercent vacío."
+                )
+
+            numero_excel = (
+                _quantity_or_percent_a_numero_excel(
+                    valor,
+                    contexto=(
+                        f"TEMPLATE {ruta_template}, "
+                        f"fila {fila}"
+                    ),
+                )
+            )
+
+            debe_normalizar = (
+                isinstance(
+                    valor,
+                    str,
+                )
+                or celda_valor.data_type
+                != "n"
+                or celda_valor.number_format
+                == "@"
+            )
+
+            if debe_normalizar:
+                normalizadas += 1
+
+            # Se asigna siempre un tipo Python numérico.
+            # OpenPyXL lo serializa como celda Excel tipo "n".
+            celda_valor.value = (
+                numero_excel
+            )
+
+            # Evita conservar formato explícito "Texto".
+            if (
+                celda_valor.number_format
+                == "@"
+            ):
+                celda_valor.number_format = (
+                    "General"
+                )
+
+        if normalizadas == 0:
+            return {
+                "modificado": False,
+                "normalizadas": 0,
+                "formulas_omitidas": 0,
+            }
+
+        temporal = (
+            ruta_template.with_name(
+                f".{ruta_template.stem}."
+                f"{os.getpid()}."
+                f"{uuid.uuid4().hex}"
+                f"{ruta_template.suffix}"
+            )
+        )
+
+        wb.save(
+            temporal
+        )
+
+        wb.close()
+
+        wb = None
+
+        os.replace(
+            temporal,
+            ruta_template,
+        )
+
+        temporal = None
+
+        return {
+            "modificado": True,
+            "normalizadas": normalizadas,
+            "formulas_omitidas": 0,
+        }
+
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        if temporal is not None:
+            try:
+                temporal.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+
+def crear_snapshot_template_estable(
+    origen: str | Path,
+    destino: str | Path,
+) -> dict[str, Any]:
+    """
+    Snapshot estable + normalización del archivo que realmente
+    se subirá a CBN.
+
+    La metadata final describe el snapshot ya normalizado.
+    El SHA original también se conserva para trazabilidad.
+    """
+    metadata = crear_snapshot_estable(
+        origen,
+        destino,
+    )
+
+    sha256_origen = metadata[
+        "sha256"
+    ]
+
+    destino = Path(
+        destino
+    ).resolve()
+
+    # Históricamente este helper también puede usarse con
+    # fixtures/opacos que tienen extensión .xlsx pero no son
+    # realmente un workbook ZIP. En ese caso conservamos el
+    # comportamiento anterior: snapshot exacto, sin intentar
+    # interpretar su contenido.
+    #
+    # En el flujo productivo los TEMPLATE reales ya fueron
+    # validados por reader.py antes de llegar aquí.
+    if zipfile.is_zipfile(
+        destino
+    ):
+        normalizacion = (
+            normalizar_quantity_or_percent_snapshot(
+                destino
+            )
+        )
+    else:
+        normalizacion = {
+            "modificado": False,
+            "normalizadas": 0,
+            "formulas_omitidas": 0,
+            "omitido_no_excel": True,
+            "motivo": "snapshot_no_es_xlsx_zip",
+        }
+
+    metadata[
+        "sha256_origen"
+    ] = sha256_origen
+
+    metadata[
+        "sha256"
+    ] = sha256_archivo(
+        destino
+    )
+
+    metadata[
+        "bytes"
+    ] = destino.stat().st_size
+
+    metadata[
+        "normalizacion_quantity_or_percent"
+    ] = normalizacion
+
+    return metadata
+
+
 def _clave_ruta(ruta: Path) -> str:
     return os.path.normcase(
         str(ruta.resolve())
@@ -217,7 +609,7 @@ def congelar_templates_ordenes(
             / _nombre_snapshot_template(ruta)
         )
 
-        metadata = crear_snapshot_estable(
+        metadata = crear_snapshot_template_estable(
             ruta,
             destino,
         )
