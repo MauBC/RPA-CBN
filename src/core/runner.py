@@ -35,6 +35,8 @@ from src.excel.state_manager import (
     obtener_fila_excel_por_id,
 )
 from src.excel.pending_sync import (
+    registrar_orden_inflight,
+    cerrar_orden_inflight,
     aplicar_actualizaciones_pendientes_a_snapshot,
     persistir_o_encolar_resultado,
     sincronizar_actualizaciones_pendientes,
@@ -129,6 +131,7 @@ def _persistir_resultado_excel(
     estado_rpa: int,
     resumen: str | None,
     version_esperada: dict[str, Any] | None = None,
+    inflight_id: str | None = None,
 ):
     """
     Persiste el resultado de una orden sin convertir un fallo
@@ -144,6 +147,38 @@ def _persistir_resultado_excel(
         resumen=resumen,
         version_esperada=version_esperada,
     )
+
+    if (
+        inflight_id
+        and (
+            resultado.aplicado
+            or resultado.ruta_journal is not None
+        )
+    ):
+        try:
+            cerrado = cerrar_orden_inflight(
+                ruta_excel,
+                id_orden,
+                inflight_id,
+            )
+
+            if not cerrado:
+                print(
+                    "[ADVERTENCIA] No se pudo confirmar "
+                    "el cierre de inflight para "
+                    f"ID_ORDEN={id_orden}."
+                )
+
+        except Exception as error_inflight:
+            # Conservador: si el resultado ya es durable
+            # pero no podemos limpiar inflight, dejamos
+            # la marca para impedir un reprocesamiento.
+            print(
+                "[ADVERTENCIA] Resultado durable, pero "
+                "no se pudo limpiar inflight para "
+                f"ID_ORDEN={id_orden}: "
+                f"{error_inflight}"
+            )
 
     if resultado.aplicado:
         print(
@@ -826,6 +861,19 @@ def ejecutar_rpa(
                             message=f"Procesando orden {indice} de {total}",
                         )
 
+                        inflight_id_orden = (
+                            registrar_orden_inflight(
+                                ruta_excel,
+                                orden.id_orden,
+                                version_esperada=version_excel_orden,
+                            )
+                        )
+
+                        print(
+                            f"Inflight registrado para "
+                            f"ID_ORDEN={orden.id_orden}."
+                        )
+
                         try:
                             print(
                                 f"Fila Excel: "
@@ -856,6 +904,7 @@ def ejecutar_rpa(
                                 estado_rpa=1,
                                 resumen=resumen_orden,
                                 version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             print(
@@ -917,6 +966,7 @@ def ejecutar_rpa(
                                 estado_rpa=2,
                                 resumen=None,
                                 version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             _emitir(
@@ -990,6 +1040,7 @@ def ejecutar_rpa(
                                 estado_rpa=2,
                                 resumen=None,
                                 version_esperada=version_excel_orden,
+                                inflight_id=inflight_id_orden,
                             )
 
                             _emitir(

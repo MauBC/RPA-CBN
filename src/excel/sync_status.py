@@ -132,6 +132,13 @@ def obtener_estado_sincronizacion_excel(
             ]
         )
 
+        inflight = len(
+            estado_journal.get(
+                "inflight",
+                [],
+            )
+        )
+
     except Exception as error:
         return ResumenSincronizacionExcel(
             ruta=ruta,
@@ -205,14 +212,26 @@ def obtener_estado_sincronizacion_excel(
 
     # Una operación aislada requiere atención aunque además
     # existan cambios recuperables pendientes.
-    if fallidas:
-        partes = [
-            _texto_cantidad(
-                fallidas,
-                "actualización requiere revisión",
-                "actualizaciones requieren revisión",
+    if fallidas or inflight:
+        partes = []
+
+        if inflight:
+            partes.append(
+                _texto_cantidad(
+                    inflight,
+                    "orden en ejecuci\u00f3n incierta",
+                    "ordenes en ejecuci\u00f3n incierta",
+                )
             )
-        ]
+
+        if fallidas:
+            partes.append(
+                _texto_cantidad(
+                    fallidas,
+                    "actualizaci\u00f3n requiere revisi\u00f3n",
+                    "actualizaciones requieren revisi\u00f3n",
+                )
+            )
 
         if pendientes:
             partes.append(
@@ -233,7 +252,7 @@ def obtener_estado_sincronizacion_excel(
             estado=(
                 EstadoSincronizacionExcel.REQUIERE_REVISION
             ),
-            mensaje=" · ".join(partes),
+            mensaje=" ? ".join(partes),
             pendientes=pendientes,
             fallidas=fallidas,
             puede_escribir=(

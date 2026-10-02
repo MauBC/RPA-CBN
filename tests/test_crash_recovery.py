@@ -469,3 +469,73 @@ def test_replay_crash_preserva_edicion_humana_de_otra_orden(
 
     finally:
         wb.close()
+
+
+
+def test_journal_lock_reintenta_permissionerror_transitorio_windows(
+    tmp_path,
+    monkeypatch,
+):
+    import src.excel.pending_sync as pending_sync
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(tmp_path / "journal"),
+    )
+
+    excel = _crear_excel(
+        tmp_path / "DATA.xlsx"
+    )
+
+    original_open = (
+        pending_sync.os.open
+    )
+
+    llamadas = {
+        "total": 0,
+    }
+
+    def open_con_colision(
+        path,
+        flags,
+        *args,
+        **kwargs,
+    ):
+        if (
+            str(path).endswith(".lock")
+            and llamadas["total"] == 0
+        ):
+            llamadas["total"] += 1
+
+            raise PermissionError(
+                13,
+                "Colision transitoria Windows",
+                str(path),
+            )
+
+        llamadas["total"] += 1
+
+        return original_open(
+            path,
+            flags,
+            *args,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        pending_sync.os,
+        "open",
+        open_con_colision,
+    )
+
+    with pending_sync._journal_lock(
+        excel,
+        timeout_segundos=1,
+    ):
+        pass
+
+    assert llamadas["total"] >= 2
+
+    assert not pending_sync._ruta_lock_journal(
+        excel
+    ).exists()

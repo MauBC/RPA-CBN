@@ -18,7 +18,7 @@ from src.excel.retry_policy import (
 )
 
 
-VERSION_JOURNAL = 2
+VERSION_JOURNAL = 3
 
 
 class EstadoPersistenciaExcel(str, Enum):
@@ -208,7 +208,16 @@ def _journal_lock(
 
             break
 
-        except FileExistsError:
+        except (
+            FileExistsError,
+            PermissionError,
+        ) as error_lock:
+            # En Windows, dos procesos/threads compitiendo
+            # por O_CREAT | O_EXCL pueden producir tanto
+            # FileExistsError como PermissionError.
+            #
+            # Ambos representan contencion transitoria del
+            # lock y deben seguir la misma politica de espera.
             try:
                 antiguedad = (
                     time.time()
@@ -216,11 +225,29 @@ def _journal_lock(
                 )
 
                 if antiguedad > 120:
-                    ruta_lock.unlink()
-                    continue
+                    try:
+                        ruta_lock.unlink()
+
+                    except FileNotFoundError:
+                        continue
+
+                    except PermissionError:
+                        # Otro proceso todavia mantiene
+                        # acceso al lock. No se roba.
+                        pass
+
+                    else:
+                        continue
 
             except FileNotFoundError:
+                # Carrera entre comprobacion y eliminacion.
+                # Volvemos a intentar inmediatamente.
                 continue
+
+            except PermissionError:
+                # Windows puede impedir temporalmente incluso
+                # consultar metadata del archivo bloqueado.
+                pass
 
             if (
                 time.monotonic() - inicio
@@ -229,7 +256,7 @@ def _journal_lock(
                 raise TimeoutError(
                     f"No se pudo obtener lock "
                     f"del journal: {ruta_lock}"
-                )
+                ) from error_lock
 
             time.sleep(0.05)
 
@@ -261,6 +288,7 @@ def _journal_vacio(
         ),
         "updates": {},
         "failed_updates": {},
+        "inflight": {},
     }
 
 
@@ -330,6 +358,22 @@ def _leer_journal_sin_lock(
         failed_updates
     )
 
+    inflight = contenido.get(
+        "inflight",
+        {},
+    )
+
+    if not isinstance(
+        inflight,
+        dict,
+    ):
+        raise RuntimeError(
+            f"Journal con 'inflight' invalido: "
+            f"{ruta_journal}"
+        )
+
+    contenido["inflight"] = inflight
+
     contenido.setdefault(
         "version",
         1,
@@ -356,9 +400,15 @@ def _guardar_journal_sin_lock(
         {},
     )
 
+    inflight = journal.get(
+        "inflight",
+        {},
+    )
+
     if (
         not updates
         and not failed_updates
+        and not inflight
     ):
         try:
             ruta_journal.unlink()
@@ -412,11 +462,7 @@ def obtener_estado_journal(
     ruta_excel: str | Path,
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Lee updates y failed_updates usando un único lock
-    y una única lectura física del journal.
-
-    Se utiliza principalmente para consultas de estado
-    donde necesitamos ambas colecciones simultáneamente.
+    Lee updates, failed_updates e inflight bajo un unico lock.
     """
     with _journal_lock(
         ruta_excel
@@ -436,6 +482,14 @@ def obtener_estado_journal(
             for valor
             in journal[
                 "failed_updates"
+            ].values()
+        ]
+
+        inflight = [
+            dict(valor)
+            for valor
+            in journal[
+                "inflight"
             ].values()
         ]
 
@@ -475,9 +529,28 @@ def obtener_estado_journal(
         ),
     )
 
+    inflight = sorted(
+        inflight,
+        key=lambda item: (
+            str(
+                item.get(
+                    "started_at",
+                    "",
+                )
+            ),
+            str(
+                item.get(
+                    "id_orden",
+                    "",
+                )
+            ),
+        ),
+    )
+
     return {
         "pendientes": pendientes,
         "fallidas": fallidas,
+        "inflight": inflight,
     }
 
 
@@ -555,6 +628,218 @@ def obtener_actualizaciones_fallidas(
             ),
         ),
     )
+
+
+def obtener_ordenes_inflight(
+    ruta_excel: str | Path,
+) -> list[dict[str, Any]]:
+    return obtener_estado_journal(
+        ruta_excel
+    )["inflight"]
+
+
+def registrar_orden_inflight(
+    ruta_excel: str | Path,
+    id_orden: Any,
+    *,
+    version_esperada: dict[str, Any] | None = None,
+) -> str:
+    """
+    Registra durablemente que una orden va a entrar a CBN.
+
+    Mientras exista esta marca, esa orden no debe volver
+    a tratarse automaticamente como pendiente.
+    """
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    if not id_normalizado:
+        raise ValueError(
+            "id_orden no puede estar vacio."
+        )
+
+    ahora = _ahora_iso()
+    inflight_id = uuid.uuid4().hex
+
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        if (
+            id_normalizado
+            in journal["updates"]
+        ):
+            raise RuntimeError(
+                "La orden ya tiene un resultado "
+                "pendiente de sincronizacion. "
+                f"ID_ORDEN={id_normalizado}."
+            )
+
+        if (
+            id_normalizado
+            in journal["failed_updates"]
+        ):
+            raise RuntimeError(
+                "La orden ya requiere revision manual. "
+                f"ID_ORDEN={id_normalizado}."
+            )
+
+        if (
+            id_normalizado
+            in journal["inflight"]
+        ):
+            raise RuntimeError(
+                "La orden ya esta marcada como inflight. "
+                f"ID_ORDEN={id_normalizado}."
+            )
+
+        journal["inflight"][
+            id_normalizado
+        ] = {
+            "id_orden": id_normalizado,
+            "inflight_id": inflight_id,
+            "started_at": ahora,
+            "updated_at": ahora,
+            "pid": os.getpid(),
+            "version_esperada": (
+                dict(version_esperada)
+                if version_esperada is not None
+                else None
+            ),
+        }
+
+        journal["version"] = (
+            VERSION_JOURNAL
+        )
+
+        journal["target_excel"] = str(
+            _ruta_resuelta(
+                ruta_excel
+            )
+        )
+
+        _guardar_journal_sin_lock(
+            ruta_excel,
+            journal,
+        )
+
+    return inflight_id
+
+
+def cerrar_orden_inflight(
+    ruta_excel: str | Path,
+    id_orden: Any,
+    inflight_id: str,
+) -> bool:
+    """
+    Elimina inflight solo si pertenece exactamente
+    a la instancia que lo creo.
+    """
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    token = str(
+        inflight_id or ""
+    ).strip()
+
+    if (
+        not id_normalizado
+        or not token
+    ):
+        return False
+
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        actual = journal[
+            "inflight"
+        ].get(
+            id_normalizado
+        )
+
+        if not isinstance(
+            actual,
+            dict,
+        ):
+            return False
+
+        if (
+            str(
+                actual.get(
+                    "inflight_id",
+                    "",
+                )
+            )
+            != token
+        ):
+            return False
+
+        del journal[
+            "inflight"
+        ][
+            id_normalizado
+        ]
+
+        _guardar_journal_sin_lock(
+            ruta_excel,
+            journal,
+        )
+
+    return True
+
+
+def _depurar_inflight_resueltos(
+    ruta_excel: str | Path,
+) -> int:
+    """
+    Recuperacion de crash:
+
+    Si existen simultaneamente inflight y un resultado durable
+    para el mismo ID en updates/failed_updates, inflight ya es
+    redundante y puede eliminarse.
+    """
+    eliminados = 0
+
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        for id_orden in list(
+            journal["inflight"].keys()
+        ):
+            if (
+                id_orden
+                in journal["updates"]
+                or id_orden
+                in journal["failed_updates"]
+            ):
+                del journal[
+                    "inflight"
+                ][
+                    id_orden
+                ]
+
+                eliminados += 1
+
+        if eliminados:
+            _guardar_journal_sin_lock(
+                ruta_excel,
+                journal,
+            )
+
+    return eliminados
 
 
 def hay_actualizaciones_pendientes(
@@ -1333,6 +1618,10 @@ def sincronizar_actualizaciones_pendientes(
     - una entrada aislada no vuelve a reintentarse
       automáticamente.
     """
+    _depurar_inflight_resueltos(
+        ruta_excel
+    )
+
     pendientes = (
         obtener_actualizaciones_pendientes(
             ruta_excel
@@ -1619,6 +1908,13 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
         ]
     )
 
+    inflight_persistentes = (
+        estado_journal.get(
+            "inflight",
+            [],
+        )
+    )
+
     resultado = {
         "total": len(
             pendientes
@@ -1630,6 +1926,10 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
         "bloqueadas": len(
             fallidas_persistentes
         ),
+        "inflight": len(
+            inflight_persistentes
+        ),
+        "omitidas_inflight": 0,
         "detalles": [],
     }
 
@@ -1660,6 +1960,63 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
             )
 
         return resultado
+
+    if inflight_persistentes:
+        from src.excel.state_manager import (
+            actualizar_resultado_orden,
+        )
+
+        for actualizacion in inflight_persistentes:
+            id_orden = str(
+                actualizacion.get(
+                    "id_orden",
+                    "",
+                )
+            )
+
+            try:
+                actualizar_resultado_orden(
+                    ruta_snapshot,
+                    id_orden,
+                    estado_rpa=2,
+                    resumen=None,
+                )
+
+                resultado[
+                    "omitidas_inflight"
+                ] += 1
+
+                resultado[
+                    "detalles"
+                ].append(
+                    {
+                        "id_orden": id_orden,
+                        "estado": (
+                            "INFLIGHT_OMITIDO"
+                        ),
+                        "detalle": (
+                            "La orden queda fuera de pendientes "
+                            "hasta resolver su ejecucion anterior."
+                        ),
+                    }
+                )
+
+            except Exception as error:
+                resultado[
+                    "fallidas"
+                ] += 1
+
+                resultado[
+                    "detalles"
+                ].append(
+                    {
+                        "id_orden": id_orden,
+                        "estado": (
+                            "INFLIGHT_OVERLAY_ERROR"
+                        ),
+                        "detalle": str(error),
+                    }
+                )
 
     if not pendientes:
         return resultado
