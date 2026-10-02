@@ -22,6 +22,31 @@ class EstadoSincronizacionExcel(str, Enum):
     NO_EXISTE = "NO_EXISTE"
 
 
+class TipoIncidenciaSincronizacion(str, Enum):
+    PENDIENTE = "PENDIENTE"
+    FALLIDA = "FALLIDA"
+    INFLIGHT = "INFLIGHT"
+
+
+@dataclass(frozen=True)
+class IncidenciaSincronizacionExcel:
+    """
+    Información operativa de una orden con estado de
+    sincronización pendiente o incierto.
+
+    Este contrato está pensado para presentación/diagnóstico.
+    No reemplaza ni modifica el journal persistente.
+    """
+
+    tipo: TipoIncidenciaSincronizacion
+    id_orden: str
+    fecha: str = ""
+    intentos: int = 0
+    codigo: str = ""
+    motivo: str = ""
+    reintento_automatico: bool = False
+
+
 @dataclass(frozen=True)
 class ResumenSincronizacionExcel:
     ruta: Path
@@ -31,8 +56,13 @@ class ResumenSincronizacionExcel:
     fallidas: int
     puede_escribir: bool
     ocupado: bool
+    inflight: int = 0
     winerror: int | None = None
     detalle: str = ""
+    incidencias: tuple[
+        IncidenciaSincronizacionExcel,
+        ...
+    ] = ()
 
     @property
     def sincronizado(self) -> bool:
@@ -62,6 +92,196 @@ def _texto_cantidad(
     )
 
     return f"{cantidad} {palabra}"
+
+
+def _entero_seguro(
+    valor: object,
+) -> int:
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _primer_texto(
+    item: dict,
+    *claves: str,
+) -> str:
+    for clave in claves:
+        valor = item.get(
+            clave
+        )
+
+        if valor is None:
+            continue
+
+        texto = str(
+            valor
+        ).strip()
+
+        if texto:
+            return texto
+
+    return ""
+
+
+def _construir_incidencias(
+    estado_journal: dict,
+) -> tuple[
+    IncidenciaSincronizacionExcel,
+    ...,
+]:
+    """
+    Convierte la información técnica del journal a un contrato
+    estable de observabilidad.
+
+    No modifica ni normaliza el journal original.
+    """
+    resultado: list[
+        IncidenciaSincronizacionExcel
+    ] = []
+
+    for item in estado_journal.get(
+        "pendientes",
+        [],
+    ):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        motivo = _primer_texto(
+            item,
+            "ultimo_error",
+        )
+
+        if not motivo:
+            motivo = (
+                "Resultado pendiente de sincronizar "
+                "con el archivo Excel."
+            )
+
+        resultado.append(
+            IncidenciaSincronizacionExcel(
+                tipo=(
+                    TipoIncidenciaSincronizacion.PENDIENTE
+                ),
+                id_orden=_primer_texto(
+                    item,
+                    "id_orden",
+                ),
+                fecha=_primer_texto(
+                    item,
+                    "updated_at",
+                    "created_at",
+                ),
+                intentos=_entero_seguro(
+                    item.get(
+                        "intentos",
+                        0,
+                    )
+                ),
+                codigo=_primer_texto(
+                    item,
+                    "ultimo_codigo_error",
+                ),
+                motivo=motivo,
+                reintento_automatico=True,
+            )
+        )
+
+    for item in estado_journal.get(
+        "fallidas",
+        [],
+    ):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        motivo = _primer_texto(
+            item,
+            "sync_error_detail",
+            "ultimo_error",
+        )
+
+        if not motivo:
+            motivo = (
+                "La actualización requiere "
+                "revisión manual."
+            )
+
+        resultado.append(
+            IncidenciaSincronizacionExcel(
+                tipo=(
+                    TipoIncidenciaSincronizacion.FALLIDA
+                ),
+                id_orden=_primer_texto(
+                    item,
+                    "id_orden",
+                ),
+                fecha=_primer_texto(
+                    item,
+                    "sync_failed_at",
+                    "updated_at",
+                    "created_at",
+                ),
+                intentos=_entero_seguro(
+                    item.get(
+                        "intentos",
+                        0,
+                    )
+                ),
+                codigo=_primer_texto(
+                    item,
+                    "sync_error_code",
+                    "ultimo_codigo_error",
+                ),
+                motivo=motivo,
+                reintento_automatico=False,
+            )
+        )
+
+    for item in estado_journal.get(
+        "inflight",
+        [],
+    ):
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        resultado.append(
+            IncidenciaSincronizacionExcel(
+                tipo=(
+                    TipoIncidenciaSincronizacion.INFLIGHT
+                ),
+                id_orden=_primer_texto(
+                    item,
+                    "id_orden",
+                ),
+                fecha=_primer_texto(
+                    item,
+                    "started_at",
+                    "updated_at",
+                ),
+                intentos=0,
+                codigo="EJECUCION_INCIERTA",
+                motivo=(
+                    "La ejecución anterior no tiene "
+                    "un resultado final confirmado. "
+                    "No debe reprocesarse automáticamente."
+                ),
+                reintento_automatico=False,
+            )
+        )
+
+    return tuple(
+        resultado
+    )
 
 
 def obtener_estado_sincronizacion_excel(
@@ -139,6 +359,12 @@ def obtener_estado_sincronizacion_excel(
             )
         )
 
+        incidencias = (
+            _construir_incidencias(
+                estado_journal
+            )
+        )
+
     except Exception as error:
         return ResumenSincronizacionExcel(
             ruta=ruta,
@@ -185,6 +411,8 @@ def obtener_estado_sincronizacion_excel(
             pendientes=pendientes,
             fallidas=fallidas,
             puede_escribir=False,
+            inflight=inflight,
+            incidencias=incidencias,
             ocupado=False,
             winerror=diagnostico.winerror,
             detalle=diagnostico.detalle,
@@ -205,6 +433,8 @@ def obtener_estado_sincronizacion_excel(
             pendientes=pendientes,
             fallidas=fallidas,
             puede_escribir=False,
+            inflight=inflight,
+            incidencias=incidencias,
             ocupado=False,
             winerror=diagnostico.winerror,
             detalle=diagnostico.detalle,
@@ -252,12 +482,14 @@ def obtener_estado_sincronizacion_excel(
             estado=(
                 EstadoSincronizacionExcel.REQUIERE_REVISION
             ),
-            mensaje=" ? ".join(partes),
+            mensaje=" · ".join(partes),
             pendientes=pendientes,
             fallidas=fallidas,
             puede_escribir=(
                 diagnostico.puede_escribir
             ),
+            inflight=inflight,
+            incidencias=incidencias,
             ocupado=diagnostico.ocupado,
             winerror=diagnostico.winerror,
             detalle=diagnostico.detalle,
@@ -298,6 +530,8 @@ def obtener_estado_sincronizacion_excel(
             puede_escribir=(
                 diagnostico.puede_escribir
             ),
+            inflight=0,
+            incidencias=incidencias,
             ocupado=diagnostico.ocupado,
             winerror=diagnostico.winerror,
             detalle=diagnostico.detalle,

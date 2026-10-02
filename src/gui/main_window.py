@@ -19,6 +19,7 @@ from src.utils.app_config import cargar_configuracion, guardar_configuracion
 from src.excel.sync_status import (
     EstadoSincronizacionExcel,
     ResumenSincronizacionExcel,
+    TipoIncidenciaSincronizacion,
     obtener_estado_sincronizacion_excel,
 )
 from src.utils.app_paths import (
@@ -135,6 +136,118 @@ def _resumen_importes(ordenes: list[dict[str, Any]]) -> str:
 
     partes = [f"{moneda} {_formatear_importe(valor)}" for moneda, valor in sorted(totales.items())]
     return " | ".join(partes)
+
+
+def _ids_incidencias_sincronizacion(
+    resultado: ResumenSincronizacionExcel,
+    tipo: TipoIncidenciaSincronizacion,
+    *,
+    limite: int = 4,
+) -> str:
+    """
+    Devuelve una lista compacta de ID_ORDEN para la GUI.
+
+    Evita convertir el indicador de sincronización en un
+    visor de logs cuando existen muchas incidencias.
+    """
+    ids = [
+        incidencia.id_orden
+        for incidencia in resultado.incidencias
+        if (
+            incidencia.tipo == tipo
+            and incidencia.id_orden
+        )
+    ]
+
+    if not ids:
+        return ""
+
+    visibles = ids[
+        :limite
+    ]
+
+    texto = ", ".join(
+        visibles
+    )
+
+    restantes = (
+        len(ids)
+        - len(visibles)
+    )
+
+    if restantes > 0:
+        texto += (
+            f" (+{restantes} más)"
+        )
+
+    return texto
+
+
+def _texto_estado_sincronizacion_gui(
+    resultado: ResumenSincronizacionExcel,
+) -> str:
+    """
+    Construye el texto orientado al operador.
+
+    La primera línea conserva el resumen general existente.
+    Las líneas adicionales aparecen solo cuando aportan una
+    acción clara y usan el contrato estructurado de CP13A.1.
+    """
+    lineas = [
+        f"Excel: {resultado.mensaje}"
+    ]
+
+    ids_inflight = (
+        _ids_incidencias_sincronizacion(
+            resultado,
+            TipoIncidenciaSincronizacion.INFLIGHT,
+        )
+    )
+
+    ids_fallidas = (
+        _ids_incidencias_sincronizacion(
+            resultado,
+            TipoIncidenciaSincronizacion.FALLIDA,
+        )
+    )
+
+    ids_pendientes = (
+        _ids_incidencias_sincronizacion(
+            resultado,
+            TipoIncidenciaSincronizacion.PENDIENTE,
+        )
+    )
+
+    if ids_inflight:
+        lineas.append(
+            "Ejecución incierta: "
+            f"{ids_inflight}. "
+            "No reprocesar automáticamente."
+        )
+
+    if ids_fallidas:
+        lineas.append(
+            "Revisión manual: "
+            f"{ids_fallidas}."
+        )
+
+    if (
+        ids_pendientes
+        and resultado.estado
+        in {
+            EstadoSincronizacionExcel.PENDIENTE,
+            EstadoSincronizacionExcel.EXCEL_OCUPADO,
+            EstadoSincronizacionExcel.REQUIERE_REVISION,
+        }
+    ):
+        lineas.append(
+            "Pendientes de sincronizar: "
+            f"{ids_pendientes}."
+        )
+
+    return "\n".join(
+        lineas
+    )
 
 
 def _color_estado_sincronizacion(
@@ -714,7 +827,9 @@ class VentanaPrincipal(ctk.CTk):
 
         self.etiqueta_sync_excel.configure(
             text=(
-                f"Excel: {resultado.mensaje}"
+                _texto_estado_sincronizacion_gui(
+                    resultado
+                )
             ),
             text_color=color,
         )
