@@ -746,6 +746,176 @@ def actualizar_resultado_orden(
     return filas_actualizadas
 
 
+
+def reiniciar_orden_fallida(
+    ruta_excel: str | Path,
+    id_orden_buscado: Any,
+) -> int:
+    """
+    Restablece ESTADO_RPA de 2 a 0 para un ID_ORDEN fallido.
+
+    Reglas:
+    - el ID debe existir;
+    - ESTADO_RPA debe existir;
+    - todas las posiciones del mismo ID deben estar en estado 2;
+    - se actualizan todas las posiciones en una sola transacción;
+    - RESUMEN no se modifica.
+    """
+    ruta_excel = Path(
+        ruta_excel
+    )
+
+    id_orden_buscado = _normalizar_id(
+        id_orden_buscado
+    )
+
+    if not id_orden_buscado:
+        raise ValueError(
+            "id_orden_buscado no puede estar vacío."
+        )
+
+    with _excel_lock(
+        ruta_excel
+    ):
+        wb, sha256_cargado = (
+            _cargar_workbook_estable_para_actualizacion(
+                ruta_excel
+            )
+        )
+
+        try:
+            if HOJA_ORDENES not in wb.sheetnames:
+                raise ValueError(
+                    f"No existe la hoja '{HOJA_ORDENES}'."
+                )
+
+            ws = wb[
+                HOJA_ORDENES
+            ]
+
+            headers = _headers_ws(
+                ws
+            )
+
+            if COL_ID_ORDEN not in headers:
+                raise ValueError(
+                    f"No existe la columna "
+                    f"'{COL_ID_ORDEN}'."
+                )
+
+            if COL_ESTADO_RPA not in headers:
+                raise ValueError(
+                    f"No existe la columna "
+                    f"'{COL_ESTADO_RPA}'."
+                )
+
+            col_id = headers[
+                COL_ID_ORDEN
+            ]
+
+            col_estado = headers[
+                COL_ESTADO_RPA
+            ]
+
+            filas: list[int] = []
+            estados: list[
+                tuple[int, int | None]
+            ] = []
+
+            for fila in range(
+                2,
+                ws.max_row + 1,
+            ):
+                id_orden = _normalizar_id(
+                    ws.cell(
+                        row=fila,
+                        column=col_id,
+                    ).value
+                )
+
+                if (
+                    id_orden
+                    != id_orden_buscado
+                ):
+                    continue
+
+                estado = _estado_a_int(
+                    ws.cell(
+                        row=fila,
+                        column=col_estado,
+                    ).value
+                )
+
+                filas.append(
+                    fila
+                )
+
+                estados.append(
+                    (
+                        fila,
+                        estado,
+                    )
+                )
+
+            if not filas:
+                raise ValueError(
+                    f"No se encontró "
+                    f"ID_ORDEN={id_orden_buscado}."
+                )
+
+            estados_invalidos = [
+                (
+                    fila,
+                    estado,
+                )
+                for fila, estado
+                in estados
+                if estado != 2
+            ]
+
+            if estados_invalidos:
+                detalle = ", ".join(
+                    f"fila {fila}={estado}"
+                    for fila, estado
+                    in estados
+                )
+
+                raise ValueError(
+                    "Solo puede reintentarse una orden "
+                    "cuando todas sus posiciones tienen "
+                    "ESTADO_RPA=2. "
+                    f"ID_ORDEN={id_orden_buscado}. "
+                    f"Estados actuales: {detalle}."
+                )
+
+            for fila in filas:
+                ws.cell(
+                    row=fila,
+                    column=col_estado,
+                ).value = 0
+
+            guardar_workbook_atomico(
+                wb,
+                ruta_excel,
+                sha256_esperado=(
+                    sha256_cargado
+                ),
+            )
+
+        finally:
+            wb.close()
+
+    print(
+        f"Reintento preparado para "
+        f"ID_ORDEN={id_orden_buscado}: "
+        f"{len(filas)} fila(s) "
+        "ESTADO_RPA 2 -> 0."
+    )
+
+    return len(
+        filas
+    )
+
 def actualizar_estado_orden(
     ruta_excel: str | Path,
     id_orden_buscado: Any,

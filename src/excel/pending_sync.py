@@ -52,6 +52,16 @@ class ResultadoPersistenciaExcel:
         )
 
 
+
+class ReintentoManualNoPermitidoError(
+    RuntimeError
+):
+    """
+    Impide un reintento manual cuando existe evidencia
+    persistente de que la orden no es segura para reprocesar.
+    """
+    pass
+
 def _ahora_iso() -> str:
     return datetime.now(
         timezone.utc
@@ -553,6 +563,93 @@ def obtener_estado_journal(
         "inflight": inflight,
     }
 
+
+
+def preparar_reintento_manual(
+    ruta_excel: str | Path,
+    id_orden: Any,
+) -> int:
+    """
+    Prepara una orden fallida para un reintento explícito.
+
+    Antes del cambio 2 -> 0 verifica que el ID no tenga:
+    - resultado pendiente de sincronización;
+    - failed_update;
+    - inflight.
+
+    Estas condiciones significan que CBN pudo haber realizado
+    una operación cuyo estado todavía no está reconciliado.
+    """
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    if not id_normalizado:
+        raise ValueError(
+            "id_orden no puede estar vacío."
+        )
+
+    estado = obtener_estado_journal(
+        ruta_excel
+    )
+
+    bloqueos = (
+        (
+            "pendientes",
+            (
+                "tiene un resultado pendiente de "
+                "sincronización con Excel"
+            ),
+        ),
+        (
+            "fallidas",
+            (
+                "requiere revisión manual por un "
+                "fallo de sincronización"
+            ),
+        ),
+        (
+            "inflight",
+            (
+                "tiene una ejecución anterior "
+                "con resultado incierto"
+            ),
+        ),
+    )
+
+    for coleccion, motivo in bloqueos:
+        for item in estado.get(
+            coleccion,
+            [],
+        ):
+            if (
+                _normalizar_id(
+                    item.get(
+                        "id_orden"
+                    )
+                )
+                != id_normalizado
+            ):
+                continue
+
+            raise (
+                ReintentoManualNoPermitidoError(
+                    "No es seguro reintentar "
+                    f"ID_ORDEN={id_normalizado}: "
+                    f"{motivo}. "
+                    "Revise el estado de sincronización "
+                    "antes de reprocesar la orden."
+                )
+            )
+
+    from src.excel.state_manager import (
+        reiniciar_orden_fallida,
+    )
+
+    return reiniciar_orden_fallida(
+        ruta_excel,
+        id_normalizado,
+    )
 
 def obtener_actualizaciones_pendientes(
     ruta_excel: str | Path,

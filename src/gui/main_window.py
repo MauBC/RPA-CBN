@@ -22,6 +22,9 @@ from src.excel.sync_status import (
     TipoIncidenciaSincronizacion,
     obtener_estado_sincronizacion_excel,
 )
+from src.excel.pending_sync import (
+    preparar_reintento_manual,
+)
 from src.utils.app_paths import (
     obtener_directorio_app,
     obtener_directorio_perfil,
@@ -116,6 +119,21 @@ def _formatear_importe(valor: Any) -> str:
 
     return f"{numero:,.2f}"
 
+
+
+def _texto_accion_reintento(
+    estado: Any,
+) -> str:
+    if (
+        str(
+            estado
+            or ""
+        ).strip().casefold()
+        == "error"
+    ):
+        return "Reintentar"
+
+    return ""
 
 def _resumen_importes(ordenes: list[dict[str, Any]]) -> str:
     totales: dict[str, Decimal] = {}
@@ -323,6 +341,7 @@ class VentanaPrincipal(ctk.CTk):
         self._hilo: Thread | None = None
         self._cancelar = Event()
         self._ejecutando = False
+        self._reintento_en_progreso = False
         self._directorio_actual = ""
         self._resultado_actual = ""
         self._filas_tabla: dict[str, str] = {}
@@ -539,7 +558,15 @@ class VentanaPrincipal(ctk.CTk):
         tabla_frame.grid_columnconfigure(0, weight=1)
         tabla_frame.grid_rowconfigure(0, weight=1)
 
-        columnas = ("id", "importe", "moneda", "estado", "etapa", "detalle")
+        columnas = (
+            "id",
+            "importe",
+            "moneda",
+            "estado",
+            "etapa",
+            "detalle",
+            "accion",
+        )
         self.tabla = ttk.Treeview(
             tabla_frame,
             columns=columnas,
@@ -552,12 +579,19 @@ class VentanaPrincipal(ctk.CTk):
         self.tabla.heading("estado", text="Estado")
         self.tabla.heading("etapa", text="Etapa")
         self.tabla.heading("detalle", text="Detalle")
+        self.tabla.heading("accion", text="Acción")
         self.tabla.column("id", width=85, anchor="center")
         self.tabla.column("importe", width=125, anchor="e")
         self.tabla.column("moneda", width=80, anchor="center")
         self.tabla.column("estado", width=110, anchor="center")
         self.tabla.column("etapa", width=150)
-        self.tabla.column("detalle", width=430)
+        self.tabla.column("detalle", width=355)
+        self.tabla.column(
+            "accion",
+            width=105,
+            anchor="center",
+            stretch=False,
+        )
 
         scroll_tabla = ttk.Scrollbar(
             tabla_frame,
@@ -568,6 +602,15 @@ class VentanaPrincipal(ctk.CTk):
 
         self.tabla.grid(row=0, column=0, sticky="nsew")
         scroll_tabla.grid(row=0, column=1, sticky="ns")
+
+        # ttk.Treeview no permite widgets reales dentro de cada
+        # celda. La columna Acción funciona como un botón por fila:
+        # cuando contiene "Reintentar", un clic ejecuta la acción.
+        self.tabla.bind(
+            "<ButtonRelease-1>",
+            self._manejar_click_tabla,
+            add="+",
+        )
 
         log_header = ctk.CTkFrame(cuerpo, fg_color="transparent")
         log_header.grid(row=3, column=0, padx=16, sticky="ew")
@@ -835,6 +878,195 @@ class VentanaPrincipal(ctk.CTk):
             text_color=color,
         )
 
+    def _manejar_click_tabla(
+        self,
+        evento,
+    ) -> None:
+        """
+        Convierte la celda Acción en una acción clickeable.
+
+        La columna #7 corresponde a "accion".
+        """
+        if self._ejecutando:
+            return
+
+        if self._reintento_en_progreso:
+            return
+
+        region = self.tabla.identify(
+            "region",
+            evento.x,
+            evento.y,
+        )
+
+        if region != "cell":
+            return
+
+        columna = self.tabla.identify_column(
+            evento.x
+        )
+
+        if columna != "#7":
+            return
+
+        iid = self.tabla.identify_row(
+            evento.y
+        )
+
+        if not iid:
+            return
+
+        valores = self.tabla.item(
+            iid,
+            "values",
+        )
+
+        if (
+            not valores
+            or len(valores) < 7
+        ):
+            return
+
+        accion = str(
+            valores[6]
+            or ""
+        ).strip()
+
+        if accion != "Reintentar":
+            return
+
+        id_orden = str(
+            valores[0]
+            or ""
+        ).strip()
+
+        if not id_orden:
+            return
+
+        self.tabla.selection_set(
+            iid
+        )
+
+        self.tabla.focus(
+            iid
+        )
+
+        self._preparar_reintento_orden(
+            id_orden,
+            etapa=str(
+                valores[4]
+                or ""
+            ),
+            detalle=str(
+                valores[5]
+                or ""
+            ),
+        )
+
+    def _preparar_reintento_orden(
+        self,
+        id_orden: str,
+        *,
+        etapa: str = "",
+        detalle: str = "",
+    ) -> None:
+        if self._ejecutando:
+            messagebox.showwarning(
+                "RPA en ejecución",
+                (
+                    "Espere a que termine la ejecución "
+                    "actual antes de reintentar una orden."
+                ),
+            )
+            return
+
+        if self._reintento_en_progreso:
+            return
+
+        ruta = self._obtener_excel()
+
+        if ruta is None:
+            return
+
+        texto_confirmacion = (
+            f"Se preparará para reintento la orden "
+            f"{id_orden}.\n\n"
+            "Esto cambiará ESTADO_RPA de 2 a 0 en "
+            "todas las posiciones de ese ID.\n\n"
+        )
+
+        if etapa:
+            texto_confirmacion += (
+                f"Etapa del error: {etapa}\n"
+            )
+
+        if detalle:
+            texto_confirmacion += (
+                f"Detalle: {detalle}\n\n"
+            )
+
+        texto_confirmacion += (
+            "Importante: si el portal pudo haber completado "
+            "parcialmente la operación, revise primero las "
+            "evidencias de la ejecución.\n\n"
+            "¿Desea continuar?"
+        )
+
+        confirmar = messagebox.askyesno(
+            "Reintentar orden",
+            texto_confirmacion,
+        )
+
+        if not confirmar:
+            return
+
+        self._reintento_en_progreso = True
+        self._cambiar_controles(
+            False
+        )
+
+        self.etiqueta_estado.configure(
+            text=(
+                f"Preparando reintento de "
+                f"ID_ORDEN={id_orden}..."
+            )
+        )
+
+        def trabajo() -> None:
+            try:
+                filas = (
+                    preparar_reintento_manual(
+                        ruta,
+                        id_orden,
+                    )
+                )
+
+                self._cola.put(
+                    {
+                        "type": (
+                            "manual_retry_ready"
+                        ),
+                        "id_orden": id_orden,
+                        "rows": filas,
+                    }
+                )
+
+            except Exception as error:
+                self._cola.put(
+                    {
+                        "type": (
+                            "manual_retry_error"
+                        ),
+                        "id_orden": id_orden,
+                        "message": str(error),
+                    }
+                )
+
+        Thread(
+            target=trabajo,
+            daemon=True,
+        ).start()
+
     def _solicitar_detencion(self) -> None:
         if not self._ejecutando:
             return
@@ -1017,6 +1249,113 @@ class VentanaPrincipal(ctk.CTk):
                 str(evento.get("stage", "")),
                 str(evento.get("message", "")),
             )
+
+            iid = self._filas_tabla.get(
+                id_orden
+            )
+
+            if (
+                iid
+                and self.tabla.exists(
+                    iid
+                )
+            ):
+                self.tabla.selection_set(
+                    iid
+                )
+
+                self.tabla.focus(
+                    iid
+                )
+
+                self.tabla.see(
+                    iid
+                )
+
+            return
+
+        if tipo == "manual_retry_ready":
+            self._reintento_en_progreso = False
+
+            id_orden = str(
+                evento.get(
+                    "id_orden",
+                    "",
+                )
+            )
+
+            filas = int(
+                evento.get(
+                    "rows",
+                    0,
+                )
+                or 0
+            )
+
+            self._actualizar_fila(
+                id_orden,
+                "Pendiente",
+                "Reintento preparado",
+                (
+                    "ESTADO_RPA restablecido "
+                    f"a 0 en {filas} fila(s)."
+                ),
+            )
+
+            self._cambiar_controles(
+                True
+            )
+
+            self.etiqueta_estado.configure(
+                text=(
+                    f"Orden {id_orden} preparada "
+                    "para reintento."
+                )
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            messagebox.showinfo(
+                "Reintento preparado",
+                (
+                    f"La orden {id_orden} quedó nuevamente "
+                    "en ESTADO_RPA=0.\n\n"
+                    "En el siguiente paso integraremos la "
+                    "reejecución automática únicamente "
+                    "de esta orden."
+                ),
+            )
+
+            return
+
+        if tipo == "manual_retry_error":
+            self._reintento_en_progreso = False
+
+            self._cambiar_controles(
+                True
+            )
+
+            mensaje = str(
+                evento.get(
+                    "message",
+                    "No se pudo preparar el reintento.",
+                )
+            )
+
+            self.etiqueta_estado.configure(
+                text=(
+                    "No se pudo preparar "
+                    "el reintento."
+                )
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            messagebox.showerror(
+                "Reintento no permitido",
+                mensaje,
+            )
+
             return
 
         if tipo == "progress":
@@ -1202,6 +1541,9 @@ class VentanaPrincipal(ctk.CTk):
             estado,
             etapa,
             detalle,
+            _texto_accion_reintento(
+                estado
+            ),
         )
 
         if iid and self.tabla.exists(iid):
