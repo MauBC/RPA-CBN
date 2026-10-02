@@ -1067,6 +1067,130 @@ class VentanaPrincipal(ctk.CTk):
             daemon=True,
         ).start()
 
+    def _iniciar_reintento_id(
+        self,
+        id_orden: str,
+    ) -> None:
+        """
+        Ejecuta nuevamente únicamente el ID que acaba
+        de ser restablecido de ESTADO_RPA=2 a 0.
+        """
+        if self._ejecutando:
+            return
+
+        ruta = self._obtener_excel()
+
+        if ruta is None:
+            return
+
+        navegador = NAVEGADORES_UI.get(
+            self.selector_navegador.get(),
+            "msedge",
+        )
+
+        self._ejecutando = True
+        self._reintento_en_progreso = False
+        self._cancelar.clear()
+        self._directorio_actual = ""
+        self._resultado_actual = ""
+        self.barra_progreso.set(
+            0
+        )
+
+        self._cambiar_controles(
+            False,
+            ejecutando=True,
+        )
+
+        self._actualizar_fila(
+            id_orden,
+            "Pendiente",
+            "Reintento",
+            (
+                "Reintento preparado. "
+                "Iniciando únicamente esta orden..."
+            ),
+        )
+
+        self.etiqueta_estado.configure(
+            text=(
+                f"Reintentando únicamente "
+                f"ID_ORDEN={id_orden}..."
+            )
+        )
+
+        self._agregar_log(
+            ""
+        )
+
+        self._agregar_log(
+            (
+                "=============================="
+                "=============================="
+            )
+        )
+
+        self._agregar_log(
+            (
+                "REINTENTO MANUAL "
+                f"ID_ORDEN={id_orden}"
+            )
+        )
+
+        self._agregar_log(
+            (
+                "=============================="
+                "=============================="
+            )
+        )
+
+        def callback(
+            evento: dict[str, Any]
+        ) -> None:
+            self._cola.put(
+                evento
+            )
+
+        def trabajo() -> None:
+            try:
+                ejecutar_rpa(
+                    ruta_excel=ruta,
+                    navegador=navegador,
+                    callback=callback,
+                    cancelar_evento=(
+                        self._cancelar
+                    ),
+                    solo_id_orden=id_orden,
+                )
+
+            except Exception:
+                self._cola.put(
+                    {
+                        "type": "fatal_error",
+                        "message": (
+                            "La aplicación no pudo "
+                            "completar el reintento. "
+                            "Revise las evidencias."
+                        ),
+                        "stage": "interfaz",
+                    }
+                )
+
+                self._cola.put(
+                    {
+                        "type": (
+                            "run_finished_unexpected"
+                        ),
+                    }
+                )
+
+        self._hilo = Thread(
+            target=trabajo,
+            daemon=True,
+        )
+
+        self._hilo.start()
+
     def _solicitar_detencion(self) -> None:
         if not self._ejecutando:
             return
@@ -1298,32 +1422,15 @@ class VentanaPrincipal(ctk.CTk):
                 "Reintento preparado",
                 (
                     "ESTADO_RPA restablecido "
-                    f"a 0 en {filas} fila(s)."
+                    f"a 0 en {filas} fila(s). "
+                    "Iniciando reejecución..."
                 ),
-            )
-
-            self._cambiar_controles(
-                True
-            )
-
-            self.etiqueta_estado.configure(
-                text=(
-                    f"Orden {id_orden} preparada "
-                    "para reintento."
-                )
             )
 
             self._consultar_estado_sincronizacion_excel()
 
-            messagebox.showinfo(
-                "Reintento preparado",
-                (
-                    f"La orden {id_orden} quedó nuevamente "
-                    "en ESTADO_RPA=0.\n\n"
-                    "En el siguiente paso integraremos la "
-                    "reejecución automática únicamente "
-                    "de esta orden."
-                ),
+            self._iniciar_reintento_id(
+                id_orden
             )
 
             return

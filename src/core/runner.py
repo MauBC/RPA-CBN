@@ -717,9 +717,35 @@ def ejecutar_rpa(
     callback: EventCallback | None = None,
     cancelar_evento: Event | None = None,
     pausar_al_final: bool = False,
+    solo_id_orden: Any | None = None,
 ) -> ResultadoEjecucion:
-    ruta_excel = validar_archivo_excel(ruta_excel)
-    cancelar_evento = cancelar_evento or Event()
+    ruta_excel = validar_archivo_excel(
+        ruta_excel
+    )
+
+    cancelar_evento = (
+        cancelar_evento
+        or Event()
+    )
+
+    id_objetivo: str | None = None
+
+    if solo_id_orden is not None:
+        id_objetivo = str(
+            solo_id_orden
+        ).strip()
+
+        if id_objetivo.endswith(
+            ".0"
+        ):
+            id_objetivo = (
+                id_objetivo[:-2]
+            )
+
+        if not id_objetivo:
+            raise ValueError(
+                "solo_id_orden no puede estar vacío."
+            )
 
     fecha_inicio_dt = datetime.now()
     fecha_inicio = fecha_inicio_dt.isoformat(timespec="seconds")
@@ -818,12 +844,28 @@ def ejecutar_rpa(
             _emitir(callback, "validation_started", excel=str(ruta_excel))
             print("Leyendo y validando Excel...")
 
-            ruta_trabajo, pendientes = (
-                crear_excel_trabajo_pendientes(
-                    entrada_original,
-                    solo_lectura=True,
+            if id_objetivo is None:
+                ruta_trabajo, pendientes = (
+                    crear_excel_trabajo_pendientes(
+                        entrada_original,
+                        solo_lectura=True,
+                    )
                 )
-            )
+            else:
+                print(
+                    "Modo reintento individual: "
+                    f"solo ID_ORDEN={id_objetivo}."
+                )
+
+                ruta_trabajo, pendientes = (
+                    crear_excel_trabajo_pendientes(
+                        entrada_original,
+                        solo_lectura=True,
+                        ids_objetivo={
+                            id_objetivo
+                        },
+                    )
+                )
 
             filas_excel_por_id = (
                 _indexar_filas_pendientes(
@@ -844,9 +886,28 @@ def ejecutar_rpa(
 
             if not pendientes:
                 estado_final = "SIN_PENDIENTES"
-                mensaje_final = "No hay órdenes pendientes con ESTADO_RPA = 0."
-                print(mensaje_final)
-                _emitir(callback, "no_pending", message=mensaje_final)
+
+                if id_objetivo is None:
+                    mensaje_final = (
+                        "No hay órdenes pendientes "
+                        "con ESTADO_RPA = 0."
+                    )
+                else:
+                    mensaje_final = (
+                        f"ID_ORDEN={id_objetivo} "
+                        "no está disponible como "
+                        "orden pendiente ESTADO_RPA=0."
+                    )
+
+                print(
+                    mensaje_final
+                )
+
+                _emitir(
+                    callback,
+                    "no_pending",
+                    message=mensaje_final,
+                )
             else:
                 ordenes = leer_ordenes_excel(ruta_trabajo)
 

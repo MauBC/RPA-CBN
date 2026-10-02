@@ -994,6 +994,7 @@ def crear_excel_trabajo_pendientes(
     ruta_excel: str | Path,
     *,
     solo_lectura: bool = False,
+    ids_objetivo: set[str] | None = None,
 ) -> tuple[Path, list[PendienteRPA]]:
     """
     Crea un Excel temporal con solo las órdenes ESTADO_RPA=0.
@@ -1004,11 +1005,42 @@ def crear_excel_trabajo_pendientes(
     ruta_excel = Path(ruta_excel)
 
     if solo_lectura:
-        pendientes = inspeccionar_pendientes(ruta_excel)
+        pendientes = inspeccionar_pendientes(
+            ruta_excel
+        )
     else:
-        pendientes = obtener_pendientes(ruta_excel)
+        pendientes = obtener_pendientes(
+            ruta_excel
+        )
 
-    ids_pendientes = {p.id_orden for p in pendientes}
+    if ids_objetivo is not None:
+        objetivos = {
+            _normalizar_id(
+                id_orden
+            )
+            for id_orden
+            in ids_objetivo
+            if _normalizar_id(
+                id_orden
+            )
+        }
+
+        if not objetivos:
+            raise ValueError(
+                "ids_objetivo no puede estar vacío."
+            )
+
+        pendientes = [
+            pendiente
+            for pendiente in pendientes
+            if pendiente.id_orden
+            in objetivos
+        ]
+
+    ids_pendientes = {
+        p.id_orden
+        for p in pendientes
+    }
 
     directorio_temporal = obtener_directorio_temporal() or ruta_excel.parent
     directorio_temporal.mkdir(parents=True, exist_ok=True)
