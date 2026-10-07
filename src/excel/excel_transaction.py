@@ -292,13 +292,14 @@ def guardar_workbook_atomico(
             )
 
             if winerror in (
+                5,
                 32,
                 33,
             ):
                 raise ExcelArchivoOcupadoError(
                     ruta_excel,
-                    "El archivo fue bloqueado antes "
-                    "del reemplazo final.",
+                    "Windows, Excel, OneDrive u otro proceso "
+                    "bloqueó temporalmente el reemplazo final.",
                     winerror,
                 ) from exc
 

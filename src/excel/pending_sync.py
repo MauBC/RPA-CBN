@@ -52,6 +52,16 @@ class ResultadoPersistenciaExcel:
         )
 
 
+
+class ReintentoManualNoPermitidoError(
+    RuntimeError
+):
+    """
+    Impide un reintento manual cuando existe evidencia
+    persistente de que la orden no es segura para reprocesar.
+    """
+    pass
+
 def _ahora_iso() -> str:
     return datetime.now(
         timezone.utc
@@ -554,6 +564,266 @@ def obtener_estado_journal(
     }
 
 
+
+
+class CambioEstadoIgnoradaNoPermitidoError(
+    RuntimeError
+):
+    """Un cambio manual 2/3 no es seguro por evidencia pendiente."""
+
+
+def _normalizar_ids_cambio_manual(
+    ids_orden: Any,
+) -> list[str]:
+    if isinstance(
+        ids_orden,
+        (
+            str,
+            int,
+            float,
+        ),
+    ):
+        valores = [
+            ids_orden
+        ]
+
+    else:
+        try:
+            valores = list(
+                ids_orden
+            )
+        except TypeError:
+            valores = [
+                ids_orden
+            ]
+
+    resultado: list[str] = []
+
+    for valor in valores:
+        id_orden = _normalizar_id(
+            valor
+        )
+
+        if (
+            id_orden
+            and id_orden not in resultado
+        ):
+            resultado.append(
+                id_orden
+            )
+
+    if not resultado:
+        raise ValueError(
+            "Debe indicar al menos un ID_ORDEN."
+        )
+
+    return resultado
+
+
+def _validar_sin_evidencia_journal(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+) -> list[str]:
+    """
+    Impide ocultar/reabrir una orden mientras exista
+    evidencia de sincronización o ejecución pendiente.
+    """
+    ids = _normalizar_ids_cambio_manual(
+        ids_orden
+    )
+
+    objetivos = set(
+        ids
+    )
+
+    estado = obtener_estado_journal(
+        ruta_excel
+    )
+
+    bloqueos: list[str] = []
+
+    nombres = (
+        (
+            "pendientes",
+            "sincronización pendiente",
+        ),
+        (
+            "fallidas",
+            "revisión de sincronización pendiente",
+        ),
+        (
+            "inflight",
+            "ejecución incierta",
+        ),
+    )
+
+    for coleccion, descripcion in nombres:
+        for item in estado.get(
+            coleccion,
+            [],
+        ):
+            id_orden = _normalizar_id(
+                item.get(
+                    "id_orden"
+                )
+            )
+
+            if id_orden in objetivos:
+                bloqueos.append(
+                    f"{id_orden}: {descripcion}"
+                )
+
+    if bloqueos:
+        raise (
+            CambioEstadoIgnoradaNoPermitidoError(
+                "No se puede cambiar a Ignorada/Reabierta "
+                "mientras exista evidencia pendiente: "
+                + "; ".join(
+                    bloqueos
+                )
+            )
+        )
+
+    return ids
+
+
+def ignorar_ordenes_manual(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+) -> dict[str, int]:
+    """
+    Marca órdenes fallidas normales como ignoradas.
+
+    Seguridad:
+    - exige ausencia de updates;
+    - exige ausencia de failed_updates;
+    - exige ausencia de inflight;
+    - después cambia 2 -> 3.
+    """
+    ids = _validar_sin_evidencia_journal(
+        ruta_excel,
+        ids_orden,
+    )
+
+    from src.excel.state_manager import (
+        ignorar_ordenes_fallidas,
+    )
+
+    return ignorar_ordenes_fallidas(
+        ruta_excel,
+        ids,
+    )
+
+
+def reabrir_ordenes_manual(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+) -> dict[str, int]:
+    """
+    Reabre órdenes ignoradas:
+    3 -> 2.
+    """
+    ids = _validar_sin_evidencia_journal(
+        ruta_excel,
+        ids_orden,
+    )
+
+    from src.excel.state_manager import (
+        reabrir_ordenes_ignoradas,
+    )
+
+    return reabrir_ordenes_ignoradas(
+        ruta_excel,
+        ids,
+    )
+
+
+def preparar_reintento_manual(
+    ruta_excel: str | Path,
+    id_orden: Any,
+) -> int:
+    """
+    Prepara una orden fallida para un reintento explícito.
+
+    Antes del cambio 2 -> 0 verifica que el ID no tenga:
+    - resultado pendiente de sincronización;
+    - failed_update;
+    - inflight.
+
+    Estas condiciones significan que CBN pudo haber realizado
+    una operación cuyo estado todavía no está reconciliado.
+    """
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    if not id_normalizado:
+        raise ValueError(
+            "id_orden no puede estar vacío."
+        )
+
+    estado = obtener_estado_journal(
+        ruta_excel
+    )
+
+    bloqueos = (
+        (
+            "pendientes",
+            (
+                "tiene un resultado pendiente de "
+                "sincronización con Excel"
+            ),
+        ),
+        (
+            "fallidas",
+            (
+                "requiere revisión manual por un "
+                "fallo de sincronización"
+            ),
+        ),
+        (
+            "inflight",
+            (
+                "tiene una ejecución anterior "
+                "con resultado incierto"
+            ),
+        ),
+    )
+
+    for coleccion, motivo in bloqueos:
+        for item in estado.get(
+            coleccion,
+            [],
+        ):
+            if (
+                _normalizar_id(
+                    item.get(
+                        "id_orden"
+                    )
+                )
+                != id_normalizado
+            ):
+                continue
+
+            raise (
+                ReintentoManualNoPermitidoError(
+                    "No es seguro reintentar "
+                    f"ID_ORDEN={id_normalizado}: "
+                    f"{motivo}. "
+                    "Revise el estado de sincronización "
+                    "antes de reprocesar la orden."
+                )
+            )
+
+    from src.excel.state_manager import (
+        reiniciar_orden_fallida,
+    )
+
+    return reiniciar_orden_fallida(
+        ruta_excel,
+        id_normalizado,
+    )
+
 def obtener_actualizaciones_pendientes(
     ruta_excel: str | Path,
 ) -> list[dict[str, Any]]:
@@ -840,6 +1110,161 @@ def _depurar_inflight_resueltos(
             )
 
     return eliminados
+
+
+def _es_failed_update_winerror5_legacy(
+    actualizacion: dict[str, Any],
+) -> bool:
+    """
+    Detecta exclusivamente failed_updates creados por versiones
+    anteriores que trataban WinError 5 como error no recuperable.
+    """
+    codigo = str(
+        actualizacion.get(
+            "sync_error_code",
+            "",
+        )
+        or ""
+    ).strip()
+
+    detalle = (
+        str(
+            actualizacion.get(
+                "sync_error_detail",
+                "",
+            )
+            or ""
+        )
+        + " "
+        + str(
+            actualizacion.get(
+                "ultimo_error",
+                "",
+            )
+            or ""
+        )
+    ).casefold()
+
+    return (
+        codigo == "EXCEL_ERROR_ACCESO"
+        and "winerror 5" in detalle
+    )
+
+
+def _reactivar_failed_updates_winerror5_legacy(
+    ruta_excel: str | Path,
+) -> int:
+    """
+    Devuelve a la cola recuperable únicamente failed_updates
+    históricos causados por WinError 5.
+
+    Los errores de negocio, estructura, edición humana, etc.
+    permanecen en failed_updates.
+    """
+    reactivadas = 0
+
+    with _journal_lock(
+        ruta_excel
+    ):
+        journal = _leer_journal_sin_lock(
+            ruta_excel
+        )
+
+        fallidas = journal[
+            "failed_updates"
+        ]
+
+        for id_orden in list(
+            fallidas.keys()
+        ):
+            actualizacion = (
+                fallidas.get(
+                    id_orden
+                )
+            )
+
+            if not isinstance(
+                actualizacion,
+                dict,
+            ):
+                continue
+
+            if not _es_failed_update_winerror5_legacy(
+                actualizacion
+            ):
+                continue
+
+            if (
+                id_orden
+                in journal["updates"]
+            ):
+                del fallidas[
+                    id_orden
+                ]
+
+                reactivadas += 1
+                continue
+
+            pendiente = dict(
+                actualizacion
+            )
+
+            error_anterior = str(
+                pendiente.get(
+                    "sync_error_detail",
+                    "",
+                )
+                or ""
+            )
+
+            for clave in (
+                "sync_failed_at",
+                "sync_error_code",
+                "sync_error_detail",
+                "sync_error_type",
+                "sync_recoverable",
+            ):
+                pendiente.pop(
+                    clave,
+                    None,
+                )
+
+            pendiente[
+                "updated_at"
+            ] = _ahora_iso()
+
+            pendiente[
+                "ultimo_error"
+            ] = (
+                "Reactivado automáticamente: "
+                "WinError 5 ahora se considera "
+                "un error de acceso recuperable. "
+                f"Error anterior: {error_anterior}"
+            )
+
+            journal[
+                "updates"
+            ][
+                id_orden
+            ] = pendiente
+
+            del fallidas[
+                id_orden
+            ]
+
+            reactivadas += 1
+
+        if reactivadas:
+            journal[
+                "version"
+            ] = VERSION_JOURNAL
+
+            _guardar_journal_sin_lock(
+                ruta_excel,
+                journal,
+            )
+
+    return reactivadas
 
 
 def hay_actualizaciones_pendientes(
@@ -1622,6 +2047,20 @@ def sincronizar_actualizaciones_pendientes(
         ruta_excel
     )
 
+    reactivadas_winerror5 = (
+        _reactivar_failed_updates_winerror5_legacy(
+            ruta_excel
+        )
+    )
+
+    if reactivadas_winerror5:
+        print(
+            "Recuperación OneDrive/Windows: "
+            f"{reactivadas_winerror5} "
+            "resultado(s) con WinError 5 "
+            "volvieron a la cola automática."
+        )
+
     pendientes = (
         obtener_actualizaciones_pendientes(
             ruta_excel
@@ -1975,12 +2414,28 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
             )
 
             try:
-                actualizar_resultado_orden(
-                    ruta_snapshot,
-                    id_orden,
-                    estado_rpa=2,
-                    resumen=None,
+                def aplicar_inflight_snapshot() -> int:
+                    return actualizar_resultado_orden(
+                        ruta_snapshot,
+                        id_orden,
+                        estado_rpa=2,
+                        resumen=None,
+                    )
+
+                intento_inflight = (
+                    ejecutar_con_reintentos(
+                        aplicar_inflight_snapshot
+                    )
                 )
+
+                if not intento_inflight.exito:
+                    raise (
+                        intento_inflight.error
+                        or RuntimeError(
+                            "No se pudo aplicar inflight "
+                            "al snapshot."
+                        )
+                    )
 
                 resultado[
                     "omitidas_inflight"
@@ -2033,21 +2488,37 @@ def aplicar_actualizaciones_pendientes_a_snapshot(
         )
 
         try:
-            actualizar_resultado_orden(
-                ruta_snapshot,
-                id_orden,
-                estado_rpa=int(
-                    actualizacion[
-                        "estado_rpa"
-                    ]
-                ),
-                resumen=actualizacion.get(
-                    "resumen"
-                ),
-                version_esperada=actualizacion.get(
-                    "version_esperada"
-                ),
+            def aplicar_update_snapshot() -> int:
+                return actualizar_resultado_orden(
+                    ruta_snapshot,
+                    id_orden,
+                    estado_rpa=int(
+                        actualizacion[
+                            "estado_rpa"
+                        ]
+                    ),
+                    resumen=actualizacion.get(
+                        "resumen"
+                    ),
+                    version_esperada=actualizacion.get(
+                        "version_esperada"
+                    ),
+                )
+
+            intento_overlay = (
+                ejecutar_con_reintentos(
+                    aplicar_update_snapshot
+                )
             )
+
+            if not intento_overlay.exito:
+                raise (
+                    intento_overlay.error
+                    or RuntimeError(
+                        "No se pudo aplicar el journal "
+                        "al snapshot."
+                    )
+                )
 
             resultado[
                 "aplicadas"

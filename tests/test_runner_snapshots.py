@@ -1,4 +1,4 @@
-﻿import inspect
+import inspect
 
 from src.core import runner
 
@@ -11,7 +11,12 @@ def test_ejecutar_rpa_integra_snapshots():
     assert "crear_snapshot_estable(" in codigo
 
     assert (
-        "crear_excel_trabajo_pendientes(entrada_original)"
+        "crear_excel_trabajo_pendientes("
+        in codigo
+    )
+
+    assert (
+        "solo_lectura=True"
         in codigo
     )
 

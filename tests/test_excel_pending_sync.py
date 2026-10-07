@@ -1516,3 +1516,285 @@ def test_cambio_concurrente_en_misma_orden_termina_en_failed_update(
 
     finally:
         wb.close()
+
+
+
+# ============================================================
+# CP13D.3 - compatibilidad histórica del journal
+# ============================================================
+
+
+def _escribir_journal_compatibilidad(
+    excel,
+    contenido,
+):
+    import json
+
+    journal = ruta_journal_excel(
+        excel
+    )
+
+    journal.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    journal.write_text(
+        json.dumps(
+            contenido,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return journal
+
+
+def test_cp13_journal_v1_sigue_siendo_compatible(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Schema v1 / CP7:
+    - updates
+    - sin failed_updates
+    - sin inflight
+
+    Debe seguir siendo legible sin migración manual.
+    """
+    from src.excel.pending_sync import (
+        obtener_estado_journal,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(
+            tmp_path
+            / "journal"
+        ),
+    )
+
+    excel = _crear_excel(
+        tmp_path
+        / "DATA.xlsx"
+    )
+
+    _escribir_journal_compatibilidad(
+        excel,
+        {
+            "version": 1,
+            "target_excel": str(
+                excel.resolve()
+            ),
+            "updates": {
+                "1001": {
+                    "id_orden": "1001",
+                    "estado_rpa": 1,
+                    "resumen": "PORTAL OK",
+                    "created_at": (
+                        "2026-01-01T10:00:00"
+                    ),
+                    "updated_at": (
+                        "2026-01-01T10:00:00"
+                    ),
+                    "intentos": 1,
+                    "ultimo_error": (
+                        "Excel ocupado"
+                    ),
+                },
+            },
+        },
+    )
+
+    estado = obtener_estado_journal(
+        excel
+    )
+
+    assert len(
+        estado["pendientes"]
+    ) == 1
+
+    assert (
+        estado["pendientes"][0][
+            "id_orden"
+        ]
+        == "1001"
+    )
+
+    assert (
+        estado["fallidas"]
+        == []
+    )
+
+    assert (
+        estado["inflight"]
+        == []
+    )
+
+
+def test_cp13_journal_v2_sigue_siendo_compatible(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Schema v2:
+    - updates
+    - failed_updates
+    - todavía sin inflight
+    """
+    from src.excel.pending_sync import (
+        obtener_estado_journal,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(
+            tmp_path
+            / "journal"
+        ),
+    )
+
+    excel = _crear_excel(
+        tmp_path
+        / "DATA.xlsx"
+    )
+
+    _escribir_journal_compatibilidad(
+        excel,
+        {
+            "version": 2,
+            "target_excel": str(
+                excel.resolve()
+            ),
+            "updates": {},
+            "failed_updates": {
+                "1001": {
+                    "id_orden": "1001",
+                    "estado_rpa": 1,
+                    "resumen": "PORTAL OK",
+                    "sync_failed_at": (
+                        "2026-01-01T11:00:00"
+                    ),
+                    "sync_error_code": (
+                        "EXCEL_CONFLICTO_EDICION"
+                    ),
+                    "sync_error_detail": (
+                        "Cambio humano detectado."
+                    ),
+                    "sync_recoverable": False,
+                },
+            },
+        },
+    )
+
+    estado = obtener_estado_journal(
+        excel
+    )
+
+    assert (
+        estado["pendientes"]
+        == []
+    )
+
+    assert len(
+        estado["fallidas"]
+    ) == 1
+
+    assert (
+        estado["fallidas"][0][
+            "id_orden"
+        ]
+        == "1001"
+    )
+
+    assert (
+        estado["inflight"]
+        == []
+    )
+
+
+def test_cp13_journal_v3_conserva_inflight(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Schema v3 actual:
+    updates + failed_updates + inflight.
+    """
+    from src.excel.pending_sync import (
+        obtener_estado_journal,
+    )
+
+    monkeypatch.setenv(
+        "RPA_CBN_PENDING_DIR",
+        str(
+            tmp_path
+            / "journal"
+        ),
+    )
+
+    excel = _crear_excel(
+        tmp_path
+        / "DATA.xlsx"
+    )
+
+    _escribir_journal_compatibilidad(
+        excel,
+        {
+            "version": 3,
+            "target_excel": str(
+                excel.resolve()
+            ),
+            "updates": {},
+            "failed_updates": {},
+            "inflight": {
+                "1002": {
+                    "id_orden": "1002",
+                    "inflight_id": (
+                        "inflight-prueba"
+                    ),
+                    "started_at": (
+                        "2026-01-01T12:00:00"
+                    ),
+                    "updated_at": (
+                        "2026-01-01T12:00:00"
+                    ),
+                    "pid": 1234,
+                    "version_esperada": None,
+                },
+            },
+        },
+    )
+
+    estado = obtener_estado_journal(
+        excel
+    )
+
+    assert (
+        estado["pendientes"]
+        == []
+    )
+
+    assert (
+        estado["fallidas"]
+        == []
+    )
+
+    assert len(
+        estado["inflight"]
+    ) == 1
+
+    assert (
+        estado["inflight"][0][
+            "id_orden"
+        ]
+        == "1002"
+    )
+
+    assert (
+        estado["inflight"][0][
+            "inflight_id"
+        ]
+        == "inflight-prueba"
+    )

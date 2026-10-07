@@ -33,8 +33,11 @@ from src.excel.result_writer import (
 from src.excel.state_manager import (
     crear_excel_trabajo_pendientes,
     obtener_fila_excel_por_id,
+    inspeccionar_ids_ordenes_fallidas,
+    inspeccionar_ids_ordenes_ignoradas,
 )
 from src.excel.pending_sync import (
+    obtener_estado_journal,
     registrar_orden_inflight,
     cerrar_orden_inflight,
     aplicar_actualizaciones_pendientes_a_snapshot,
@@ -91,6 +94,112 @@ def _mensaje_error_fatal(
         error,
         None,
     )
+
+
+def _ids_revision_overlay(
+    overlay: dict[str, Any],
+    *,
+    limite: int = 5,
+) -> str:
+    """
+    Resume los ID_ORDEN que requieren intervención humana.
+
+    El overlay ya contiene esta evidencia; aquí únicamente se
+    prepara para mostrarla al operador sin saturar el mensaje.
+    """
+    ids: list[str] = []
+
+    estados_revision = {
+        "FAILED_UPDATE_REQUIERE_REVISION",
+        "INFLIGHT_OVERLAY_ERROR",
+    }
+
+    for detalle in overlay.get(
+        "detalles",
+        [],
+    ):
+        if not isinstance(
+            detalle,
+            dict,
+        ):
+            continue
+
+        if str(
+            detalle.get(
+                "estado",
+                "",
+            )
+        ) not in estados_revision:
+            continue
+
+        id_orden = str(
+            detalle.get(
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if (
+            id_orden
+            and id_orden not in ids
+        ):
+            ids.append(
+                id_orden
+            )
+
+    if not ids:
+        return ""
+
+    visibles = ids[
+        :limite
+    ]
+
+    resultado = ", ".join(
+        visibles
+    )
+
+    restantes = (
+        len(ids)
+        - len(visibles)
+    )
+
+    if restantes > 0:
+        resultado += (
+            f" (+{restantes} más)"
+        )
+
+    return resultado
+
+
+def _mensaje_bloqueo_sincronizacion(
+    overlay: dict[str, Any],
+) -> str:
+    """
+    Mensaje accionable cuando existe riesgo de reprocesar una
+    operación cuyo resultado en CBN puede existir.
+    """
+    mensaje = (
+        "Se requiere revisión manual antes de volver a "
+        "ejecutar el RPA para evitar reprocesar órdenes "
+        "cuyo resultado en CBN ya puede existir."
+    )
+
+    ids = _ids_revision_overlay(
+        overlay
+    )
+
+    if ids:
+        mensaje += (
+            f" Órdenes afectadas: {ids}."
+        )
+
+    mensaje += (
+        " No reprocesar automáticamente estas órdenes "
+        "hasta resolver su estado de sincronización."
+    )
+
+    return mensaje
 
 
 @dataclass
@@ -514,41 +623,264 @@ def construir_resultado_error(
 
 
 def validar_excel_sin_ejecutar(ruta_excel: str | Path) -> dict[str, Any]:
-    ruta_excel = validar_archivo_excel(ruta_excel)
+    ruta_excel = validar_archivo_excel(
+        ruta_excel
+    )
+
     ruta_trabajo: Path | None = None
 
-    try:
-        ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(
-            ruta_excel,
-            solo_lectura=True,
+    ids_error = (
+        inspeccionar_ids_ordenes_fallidas(
+            ruta_excel
+        )
+    )
+
+    ids_ignoradas = (
+        inspeccionar_ids_ordenes_ignoradas(
+            ruta_excel
+        )
+    )
+
+    estado_journal = (
+        obtener_estado_journal(
+            ruta_excel
+        )
+    )
+
+    bloqueos: dict[
+        str,
+        tuple[str, str],
+    ] = {}
+
+    for item in estado_journal.get(
+        "pendientes",
+        [],
+    ):
+        id_orden = str(
+            item.get(
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if id_orden:
+            bloqueos[
+                id_orden
+            ] = (
+                "PENDIENTE_SINCRONIZACION",
+                (
+                    "El resultado ya está protegido y "
+                    "todavía debe sincronizarse con Excel. "
+                    "Use 'Sincronizar Excel'."
+                ),
+            )
+
+    for item in estado_journal.get(
+        "fallidas",
+        [],
+    ):
+        id_orden = str(
+            item.get(
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if id_orden:
+            codigo = str(
+                item.get(
+                    "sync_error_code",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            detalle = str(
+                item.get(
+                    "sync_error_detail",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            motivo = (
+                "La orden requiere revisión manual "
+                "antes de volver a ejecutarse."
+            )
+
+            if codigo:
+                motivo += (
+                    f" Código: {codigo}."
+                )
+
+            if detalle:
+                motivo += (
+                    f" Detalle: {detalle}"
+                )
+
+            bloqueos[
+                id_orden
+            ] = (
+                "REQUIERE_REVISION",
+                motivo,
+            )
+
+    for item in estado_journal.get(
+        "inflight",
+        [],
+    ):
+        id_orden = str(
+            item.get(
+                "id_orden",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if id_orden:
+            bloqueos[
+                id_orden
+            ] = (
+                "EJECUCION_INCIERTA",
+                (
+                    "La ejecución anterior no tiene "
+                    "un resultado final confirmado. "
+                    "No es seguro volver a procesarla."
+                ),
+            )
+
+    error_orders = []
+
+    ignored_orders = [
+        {
+            "id_orden": id_orden,
+            "reason": (
+                "Orden ignorada manualmente. "
+                "ESTADO_RPA=3. "
+                "No se procesará automáticamente."
+            ),
+        }
+        for id_orden in ids_ignoradas
+    ]
+
+    for id_orden in ids_error:
+        bloqueo = bloqueos.get(
+            id_orden
         )
 
-        if not pendientes:
-            return {
-                "ok": True,
-                "pending_count": 0,
-                "orders": [],
-                "message": "El Excel es válido, pero no tiene órdenes pendientes.",
-            }
+        if bloqueo is None:
+            error_orders.append(
+                {
+                    "id_orden": id_orden,
+                    "blocked": False,
+                    "code": "",
+                    "reason": (
+                        "Orden con ESTADO_RPA=2. "
+                        "Puede prepararse un reintento "
+                        "seguro desde la aplicación."
+                    ),
+                }
+            )
 
-        ordenes = leer_ordenes_excel(ruta_trabajo)
+        else:
+            codigo, motivo = bloqueo
+
+            error_orders.append(
+                {
+                    "id_orden": id_orden,
+                    "blocked": True,
+                    "code": codigo,
+                    "reason": motivo,
+                }
+            )
+
+    try:
+        ruta_trabajo, pendientes = (
+            crear_excel_trabajo_pendientes(
+                ruta_excel,
+                solo_lectura=True,
+            )
+        )
+
+        ordenes = []
+
+        if pendientes:
+            ordenes = leer_ordenes_excel(
+                ruta_trabajo
+            )
+
+        partes_mensaje = []
+
+        if ordenes:
+            partes_mensaje.append(
+                f"Órdenes pendientes: {len(ordenes)}"
+            )
+
+        if error_orders:
+            partes_mensaje.append(
+                f"Órdenes con error: {len(error_orders)}"
+            )
+
+        if ignored_orders:
+            partes_mensaje.append(
+                f"Órdenes ignoradas: {len(ignored_orders)}"
+            )
+
+        if partes_mensaje:
+            mensaje = (
+                "Excel válido. "
+                + " · ".join(
+                    partes_mensaje
+                )
+                + "."
+            )
+        else:
+            mensaje = (
+                "El Excel es válido, pero no tiene "
+                "órdenes pendientes ni órdenes con error."
+            )
 
         return {
             "ok": True,
-            "pending_count": len(ordenes),
+            "pending_count": len(
+                ordenes
+            ),
+            "error_count": len(
+                error_orders
+            ),
+            "ignored_count": len(
+                ignored_orders
+            ),
             "orders": [
                 {
-                    "id_orden": str(orden.id_orden),
-                    "texto": str(orden.texto),
-                    "posiciones": int(orden.posiciones),
-                    "tipo_servicio": str(orden.tipo_servicio),
-                    "valor": str(orden.valor),
-                    "moneda": str(orden.moneda),
+                    "id_orden": str(
+                        orden.id_orden
+                    ),
+                    "texto": str(
+                        orden.texto
+                    ),
+                    "posiciones": int(
+                        orden.posiciones
+                    ),
+                    "tipo_servicio": str(
+                        orden.tipo_servicio
+                    ),
+                    "valor": str(
+                        orden.valor
+                    ),
+                    "moneda": str(
+                        orden.moneda
+                    ),
                 }
                 for orden in ordenes
             ],
-            "message": f"Excel válido. Órdenes pendientes: {len(ordenes)}.",
+            "error_orders": error_orders,
+            "ignored_orders": ignored_orders,
+            "message": mensaje,
         }
+
     finally:
         if ruta_trabajo is not None:
             try:
@@ -611,9 +943,35 @@ def ejecutar_rpa(
     callback: EventCallback | None = None,
     cancelar_evento: Event | None = None,
     pausar_al_final: bool = False,
+    solo_id_orden: Any | None = None,
 ) -> ResultadoEjecucion:
-    ruta_excel = validar_archivo_excel(ruta_excel)
-    cancelar_evento = cancelar_evento or Event()
+    ruta_excel = validar_archivo_excel(
+        ruta_excel
+    )
+
+    cancelar_evento = (
+        cancelar_evento
+        or Event()
+    )
+
+    id_objetivo: str | None = None
+
+    if solo_id_orden is not None:
+        id_objetivo = str(
+            solo_id_orden
+        ).strip()
+
+        if id_objetivo.endswith(
+            ".0"
+        ):
+            id_objetivo = (
+                id_objetivo[:-2]
+            )
+
+        if not id_objetivo:
+            raise ValueError(
+                "solo_id_orden no puede estar vacío."
+            )
 
     fecha_inicio_dt = datetime.now()
     fecha_inicio = fecha_inicio_dt.isoformat(timespec="seconds")
@@ -672,11 +1030,9 @@ def ejecutar_rpa(
 
             if overlay_pendientes["fallidas"]:
                 raise SincronizacionExcelRequiereRevisionError(
-                    "Existen actualizaciones de Excel que "
-                    "no pueden resolverse automáticamente. "
-                    "Se requiere revisión manual antes de "
-                    "volver a ejecutar el RPA para evitar "
-                    "reprocesar órdenes ya ejecutadas en CBN."
+                    _mensaje_bloqueo_sincronizacion(
+                        overlay_pendientes
+                    )
                 )
 
             if overlay_pendientes["total"]:
@@ -714,7 +1070,28 @@ def ejecutar_rpa(
             _emitir(callback, "validation_started", excel=str(ruta_excel))
             print("Leyendo y validando Excel...")
 
-            ruta_trabajo, pendientes = crear_excel_trabajo_pendientes(entrada_original)
+            if id_objetivo is None:
+                ruta_trabajo, pendientes = (
+                    crear_excel_trabajo_pendientes(
+                        entrada_original,
+                        solo_lectura=True,
+                    )
+                )
+            else:
+                print(
+                    "Modo reintento individual: "
+                    f"solo ID_ORDEN={id_objetivo}."
+                )
+
+                ruta_trabajo, pendientes = (
+                    crear_excel_trabajo_pendientes(
+                        entrada_original,
+                        solo_lectura=True,
+                        ids_objetivo={
+                            id_objetivo
+                        },
+                    )
+                )
 
             filas_excel_por_id = (
                 _indexar_filas_pendientes(
@@ -735,9 +1112,28 @@ def ejecutar_rpa(
 
             if not pendientes:
                 estado_final = "SIN_PENDIENTES"
-                mensaje_final = "No hay órdenes pendientes con ESTADO_RPA = 0."
-                print(mensaje_final)
-                _emitir(callback, "no_pending", message=mensaje_final)
+
+                if id_objetivo is None:
+                    mensaje_final = (
+                        "No hay órdenes pendientes "
+                        "con ESTADO_RPA = 0."
+                    )
+                else:
+                    mensaje_final = (
+                        f"ID_ORDEN={id_objetivo} "
+                        "no está disponible como "
+                        "orden pendiente ESTADO_RPA=0."
+                    )
+
+                print(
+                    mensaje_final
+                )
+
+                _emitir(
+                    callback,
+                    "no_pending",
+                    message=mensaje_final,
+                )
             else:
                 ordenes = leer_ordenes_excel(ruta_trabajo)
 

@@ -527,4 +527,5 @@ def test_sync_status_inflight_requiere_revision(
     )
 
     assert resultado.requiere_atencion is True
+    assert resultado.inflight == 1
     assert "incierta" in resultado.mensaje
