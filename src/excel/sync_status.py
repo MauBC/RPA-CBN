@@ -17,6 +17,7 @@ class EstadoSincronizacionExcel(str, Enum):
     SINCRONIZADO = "SINCRONIZADO"
     EXCEL_OCUPADO = "EXCEL_OCUPADO"
     PENDIENTE = "PENDIENTE"
+    EN_EJECUCION = "EN_EJECUCION"
     REQUIERE_REVISION = "REQUIERE_REVISION"
     ERROR_ACCESO = "ERROR_ACCESO"
     NO_EXISTE = "NO_EXISTE"
@@ -25,6 +26,7 @@ class EstadoSincronizacionExcel(str, Enum):
 class TipoIncidenciaSincronizacion(str, Enum):
     PENDIENTE = "PENDIENTE"
     FALLIDA = "FALLIDA"
+    INFLIGHT_ACTIVO = "INFLIGHT_ACTIVO"
     INFLIGHT = "INFLIGHT"
 
 
@@ -125,8 +127,39 @@ def _primer_texto(
     return ""
 
 
+def _es_inflight_activo(
+    item: dict,
+    pid_ejecucion_activa: int | None,
+) -> bool:
+    """
+    Solo considera activo un inflight cuando el caller confirma
+    explícitamente el PID de la ejecución actual.
+
+    Si no existe esa confirmación, se mantiene como incierto.
+    """
+    if pid_ejecucion_activa is None:
+        return False
+
+    pid_item = _entero_seguro(
+        item.get(
+            "pid",
+            0,
+        )
+    )
+
+    return (
+        pid_item > 0
+        and pid_item
+        == int(
+            pid_ejecucion_activa
+        )
+    )
+
+
 def _construir_incidencias(
     estado_journal: dict,
+    *,
+    pid_ejecucion_activa: int | None = None,
 ) -> tuple[
     IncidenciaSincronizacionExcel,
     ...,
@@ -254,11 +287,39 @@ def _construir_incidencias(
         ):
             continue
 
+        activo = _es_inflight_activo(
+            item,
+            pid_ejecucion_activa,
+        )
+
+        if activo:
+            tipo = (
+                TipoIncidenciaSincronizacion.INFLIGHT_ACTIVO
+            )
+
+            codigo = "EJECUCION_ACTIVA"
+
+            motivo = (
+                "Esta orden está siendo procesada "
+                "actualmente por esta instancia del RPA."
+            )
+
+        else:
+            tipo = (
+                TipoIncidenciaSincronizacion.INFLIGHT
+            )
+
+            codigo = "EJECUCION_INCIERTA"
+
+            motivo = (
+                "La ejecución anterior no tiene "
+                "un resultado final confirmado. "
+                "No debe reprocesarse automáticamente."
+            )
+
         resultado.append(
             IncidenciaSincronizacionExcel(
-                tipo=(
-                    TipoIncidenciaSincronizacion.INFLIGHT
-                ),
+                tipo=tipo,
                 id_orden=_primer_texto(
                     item,
                     "id_orden",
@@ -269,12 +330,8 @@ def _construir_incidencias(
                     "updated_at",
                 ),
                 intentos=0,
-                codigo="EJECUCION_INCIERTA",
-                motivo=(
-                    "La ejecución anterior no tiene "
-                    "un resultado final confirmado. "
-                    "No debe reprocesarse automáticamente."
-                ),
+                codigo=codigo,
+                motivo=motivo,
                 reintento_automatico=False,
             )
         )
@@ -286,6 +343,8 @@ def _construir_incidencias(
 
 def obtener_estado_sincronizacion_excel(
     ruta_excel: str | Path,
+    *,
+    pid_ejecucion_activa: int | None = None,
 ) -> ResumenSincronizacionExcel:
     """
     Resume el estado técnico de Excel en un contrato simple
@@ -352,16 +411,44 @@ def obtener_estado_sincronizacion_excel(
             ]
         )
 
-        inflight = len(
-            estado_journal.get(
+        items_inflight = [
+            item
+            for item
+            in estado_journal.get(
                 "inflight",
                 [],
             )
+            if isinstance(
+                item,
+                dict,
+            )
+        ]
+
+        inflight = len(
+            items_inflight
+        )
+
+        inflight_activo = sum(
+            1
+            for item
+            in items_inflight
+            if _es_inflight_activo(
+                item,
+                pid_ejecucion_activa,
+            )
+        )
+
+        inflight_incierto = (
+            inflight
+            - inflight_activo
         )
 
         incidencias = (
             _construir_incidencias(
-                estado_journal
+                estado_journal,
+                pid_ejecucion_activa=(
+                    pid_ejecucion_activa
+                ),
             )
         )
 
@@ -442,13 +529,13 @@ def obtener_estado_sincronizacion_excel(
 
     # Una operación aislada requiere atención aunque además
     # existan cambios recuperables pendientes.
-    if fallidas or inflight:
+    if fallidas or inflight_incierto:
         partes = []
 
-        if inflight:
+        if inflight_incierto:
             partes.append(
                 _texto_cantidad(
-                    inflight,
+                    inflight_incierto,
                     "orden en ejecuci\u00f3n incierta",
                     "órdenes en ejecuci\u00f3n incierta",
                 )
@@ -485,6 +572,49 @@ def obtener_estado_sincronizacion_excel(
             mensaje=" · ".join(partes),
             pendientes=pendientes,
             fallidas=fallidas,
+            puede_escribir=(
+                diagnostico.puede_escribir
+            ),
+            inflight=inflight,
+            incidencias=incidencias,
+            ocupado=diagnostico.ocupado,
+            winerror=diagnostico.winerror,
+            detalle=diagnostico.detalle,
+        )
+
+    if inflight_activo:
+        partes = [
+            _texto_cantidad(
+                inflight_activo,
+                "orden procesándose ahora",
+                "órdenes procesándose ahora",
+            )
+        ]
+
+        if pendientes:
+            partes.append(
+                _texto_cantidad(
+                    pendientes,
+                    "cambio pendiente",
+                    "cambios pendientes",
+                )
+            )
+
+        if diagnostico.ocupado:
+            partes.append(
+                "Excel abierto"
+            )
+
+        return ResumenSincronizacionExcel(
+            ruta=ruta,
+            estado=(
+                EstadoSincronizacionExcel.EN_EJECUCION
+            ),
+            mensaje=" · ".join(
+                partes
+            ),
+            pendientes=pendientes,
+            fallidas=0,
             puede_escribir=(
                 diagnostico.puede_escribir
             ),

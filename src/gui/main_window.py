@@ -24,6 +24,9 @@ from src.excel.sync_status import (
 )
 from src.excel.pending_sync import (
     preparar_reintento_manual,
+    ignorar_ordenes_manual,
+    reabrir_ordenes_manual,
+    sincronizar_actualizaciones_pendientes,
 )
 from src.utils.app_paths import (
     obtener_directorio_app,
@@ -124,14 +127,16 @@ def _formatear_importe(valor: Any) -> str:
 def _texto_accion_reintento(
     estado: Any,
 ) -> str:
-    if (
-        str(
-            estado
-            or ""
-        ).strip().casefold()
-        == "error"
-    ):
+    texto = str(
+        estado
+        or ""
+    ).strip().casefold()
+
+    if texto == "error":
         return "Reintentar"
+
+    if texto == "ignorada":
+        return "Reabrir"
 
     return ""
 
@@ -215,6 +220,13 @@ def _texto_estado_sincronizacion_gui(
         f"Excel: {resultado.mensaje}"
     ]
 
+    ids_activos = (
+        _ids_incidencias_sincronizacion(
+            resultado,
+            TipoIncidenciaSincronizacion.INFLIGHT_ACTIVO,
+        )
+    )
+
     ids_inflight = (
         _ids_incidencias_sincronizacion(
             resultado,
@@ -236,6 +248,13 @@ def _texto_estado_sincronizacion_gui(
         )
     )
 
+    if ids_activos:
+        lineas.append(
+            "Procesando ahora: "
+            f"{ids_activos}. "
+            "No requiere intervención."
+        )
+
     if ids_inflight:
         lineas.append(
             "Ejecución incierta: "
@@ -256,6 +275,7 @@ def _texto_estado_sincronizacion_gui(
         in {
             EstadoSincronizacionExcel.PENDIENTE,
             EstadoSincronizacionExcel.EXCEL_OCUPADO,
+            EstadoSincronizacionExcel.EN_EJECUCION,
             EstadoSincronizacionExcel.REQUIERE_REVISION,
         }
     ):
@@ -266,6 +286,148 @@ def _texto_estado_sincronizacion_gui(
 
     return "\n".join(
         lineas
+    )
+
+
+def _texto_tipo_incidencia_gui(
+    tipo: TipoIncidenciaSincronizacion,
+) -> str:
+    if tipo == TipoIncidenciaSincronizacion.PENDIENTE:
+        return "Pendiente de sincronización"
+
+    if tipo == TipoIncidenciaSincronizacion.FALLIDA:
+        return "Requiere revisión"
+
+    if tipo == TipoIncidenciaSincronizacion.INFLIGHT_ACTIVO:
+        return "Procesándose ahora"
+
+    if tipo == TipoIncidenciaSincronizacion.INFLIGHT:
+        return "Ejecución incierta"
+
+    return str(tipo)
+
+
+def _accion_incidencia_gui(
+    tipo: TipoIncidenciaSincronizacion,
+) -> str:
+    if tipo == TipoIncidenciaSincronizacion.PENDIENTE:
+        return (
+            "Use 'Sincronizar Excel'. "
+            "No vuelva a ejecutar esta orden en CBN."
+        )
+
+    if tipo == TipoIncidenciaSincronizacion.FALLIDA:
+        return (
+            "Revise el motivo antes de realizar cualquier acción. "
+            "No reprocesar automáticamente."
+        )
+
+    if tipo == TipoIncidenciaSincronizacion.INFLIGHT_ACTIVO:
+        return (
+            "No se requiere intervención. "
+            "Espere a que termine la orden actual."
+        )
+
+    if tipo == TipoIncidenciaSincronizacion.INFLIGHT:
+        return (
+            "Confirme primero el resultado de la ejecución anterior. "
+            "No reprocesar automáticamente."
+        )
+
+    return "Revise la incidencia antes de continuar."
+
+
+def _formatear_incidencias_gui(
+    resultado: ResumenSincronizacionExcel,
+) -> str:
+    if not resultado.incidencias:
+        return (
+            "No existen incidencias registradas "
+            "para este archivo Excel."
+        )
+
+    bloques = []
+
+    for incidencia in resultado.incidencias:
+        lineas = [
+            f"Orden: {incidencia.id_orden or '(sin ID)'}",
+            (
+                "Estado: "
+                + _texto_tipo_incidencia_gui(
+                    incidencia.tipo
+                )
+            ),
+        ]
+
+        if incidencia.codigo:
+            lineas.append(
+                f"Código: {incidencia.codigo}"
+            )
+
+        if incidencia.intentos:
+            lineas.append(
+                f"Intentos: {incidencia.intentos}"
+            )
+
+        if incidencia.fecha:
+            lineas.append(
+                f"Última actualización: {incidencia.fecha}"
+            )
+
+        if incidencia.motivo:
+            lineas.append(
+                f"Motivo: {incidencia.motivo}"
+            )
+
+        lineas.append(
+            "Acción recomendada: "
+            + _accion_incidencia_gui(
+                incidencia.tipo
+            )
+        )
+
+        bloques.append(
+            "\n".join(
+                lineas
+            )
+        )
+
+    return (
+        "\n\n"
+        + ("-" * 58)
+        + "\n\n"
+    ).join(
+        bloques
+    )
+
+
+def _puede_ver_incidencias(
+    resultado: ResumenSincronizacionExcel,
+    *,
+    ejecutando: bool = False,
+) -> bool:
+    return (
+        bool(resultado.incidencias)
+        and not ejecutando
+    )
+
+
+def _puede_sincronizar_manualmente(
+    resultado: ResumenSincronizacionExcel,
+    *,
+    ejecutando: bool = False,
+    sincronizando: bool = False,
+) -> bool:
+    """
+    Indica si la GUI puede intentar journal -> Excel.
+
+    Esta acción nunca vuelve a ejecutar una orden en CBN.
+    """
+    return (
+        resultado.pendientes > 0
+        and resultado.puede_escribir
+        and not ejecutando
+        and not sincronizando
     )
 
 
@@ -284,6 +446,7 @@ def _color_estado_sincronizacion(
     if estado in {
         EstadoSincronizacionExcel.EXCEL_OCUPADO,
         EstadoSincronizacionExcel.PENDIENTE,
+        EstadoSincronizacionExcel.EN_EJECUCION,
     }:
         return (
             "#C66A00",
@@ -352,6 +515,11 @@ class VentanaPrincipal(ctk.CTk):
         # un lock temporal del journal nunca congele la interfaz.
         self._consulta_sync_activa = False
         self._intervalo_sync_ms = 2500
+        self._sincronizacion_en_progreso = False
+        self._ultimo_estado_sync: (
+            ResumenSincronizacionExcel
+            | None
+        ) = None
 
         self._config = cargar_configuracion()
 
@@ -473,14 +641,32 @@ class VentanaPrincipal(ctk.CTk):
             row=1,
             column=1,
             columnspan=4,
-            padx=(8, 16),
+            padx=(8, 8),
             pady=(0, 10),
             sticky="ew",
         )
 
+        self.boton_ver_incidencias = ctk.CTkButton(
+            configuracion,
+            text="Ver incidencias",
+            width=125,
+            state="disabled",
+            fg_color="transparent",
+            border_width=1,
+            text_color=("gray10", "gray90"),
+            command=self._mostrar_panel_incidencias,
+        )
+
+        self.boton_ver_incidencias.grid(
+            row=1,
+            column=5,
+            padx=(0, 16),
+            pady=(0, 10),
+        )
+
         acciones = ctk.CTkFrame(self, fg_color="transparent")
         acciones.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
-        acciones.grid_columnconfigure(5, weight=1)
+        acciones.grid_columnconfigure(6, weight=1)
 
         self.boton_validar = ctk.CTkButton(
             acciones,
@@ -496,6 +682,19 @@ class VentanaPrincipal(ctk.CTk):
         )
         self.boton_iniciar.grid(row=0, column=1, padx=8)
 
+        self.boton_sincronizar_excel = ctk.CTkButton(
+            acciones,
+            text="Sincronizar Excel",
+            state="disabled",
+            command=self._sincronizar_excel_manual,
+        )
+
+        self.boton_sincronizar_excel.grid(
+            row=0,
+            column=2,
+            padx=8,
+        )
+
         self.boton_detener = ctk.CTkButton(
             acciones,
             text="Detener después de la orden",
@@ -506,7 +705,7 @@ class VentanaPrincipal(ctk.CTk):
             state="disabled",
             command=self._solicitar_detencion,
         )
-        self.boton_detener.grid(row=0, column=2, padx=8)
+        self.boton_detener.grid(row=0, column=3, padx=8)
 
         self.boton_sesion = ctk.CTkButton(
             acciones,
@@ -516,7 +715,7 @@ class VentanaPrincipal(ctk.CTk):
             text_color=("gray10", "gray90"),
             command=self._restablecer_sesion,
         )
-        self.boton_sesion.grid(row=0, column=3, padx=8)
+        self.boton_sesion.grid(row=0, column=4, padx=8)
 
         self.boton_carpeta = ctk.CTkButton(
             acciones,
@@ -527,7 +726,7 @@ class VentanaPrincipal(ctk.CTk):
             state="disabled",
             command=self._abrir_ejecucion,
         )
-        self.boton_carpeta.grid(row=0, column=4, padx=8)
+        self.boton_carpeta.grid(row=0, column=5, padx=8)
 
         cuerpo = ctk.CTkFrame(self)
         cuerpo.grid(row=3, column=0, padx=20, pady=(0, 14), sticky="nsew")
@@ -571,6 +770,7 @@ class VentanaPrincipal(ctk.CTk):
             tabla_frame,
             columns=columnas,
             show="headings",
+            selectmode="extended",
             height=8,
         )
         self.tabla.heading("id", text="ID orden")
@@ -610,6 +810,45 @@ class VentanaPrincipal(ctk.CTk):
             "<ButtonRelease-1>",
             self._manejar_click_tabla,
             add="+",
+        )
+
+        acciones_tabla = ctk.CTkFrame(
+            tabla_frame,
+            fg_color="transparent",
+        )
+        acciones_tabla.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            pady=(8, 0),
+            sticky="ew",
+        )
+
+        self.boton_ignorar_seleccion = ctk.CTkButton(
+            acciones_tabla,
+            text="Ignorar seleccionadas",
+            width=170,
+            state="disabled",
+            command=self._ignorar_seleccionadas,
+        )
+        self.boton_ignorar_seleccion.grid(
+            row=0,
+            column=0,
+            padx=(0, 8),
+            sticky="w",
+        )
+
+        self.boton_reabrir_seleccion = ctk.CTkButton(
+            acciones_tabla,
+            text="Reabrir seleccionadas",
+            width=170,
+            state="disabled",
+            command=self._reabrir_seleccionadas,
+        )
+        self.boton_reabrir_seleccion.grid(
+            row=0,
+            column=1,
+            sticky="w",
         )
 
         log_header = ctk.CTkFrame(cuerpo, fg_color="transparent")
@@ -675,6 +914,16 @@ class VentanaPrincipal(ctk.CTk):
         self._guardar_config_actual()
         self.etiqueta_estado.configure(
             text="Excel seleccionado. Puede validarlo."
+        )
+
+        self._ultimo_estado_sync = None
+
+        self.boton_sincronizar_excel.configure(
+            state="disabled"
+        )
+
+        self.boton_ver_incidencias.configure(
+            state="disabled"
         )
 
         self._consultar_estado_sincronizacion_excel()
@@ -796,6 +1045,16 @@ class VentanaPrincipal(ctk.CTk):
         )
 
         if not ruta_texto:
+            self._ultimo_estado_sync = None
+
+            self.boton_sincronizar_excel.configure(
+                state="disabled"
+            )
+
+            self.boton_ver_incidencias.configure(
+                state="disabled"
+            )
+
             self.etiqueta_sync_excel.configure(
                 text=(
                     "Excel: sin archivo seleccionado."
@@ -809,11 +1068,20 @@ class VentanaPrincipal(ctk.CTk):
 
         self._consulta_sync_activa = True
 
+        pid_ejecucion_activa = (
+            os.getpid()
+            if self._ejecutando
+            else None
+        )
+
         def trabajo() -> None:
             try:
                 resultado = (
                     obtener_estado_sincronizacion_excel(
-                        ruta_texto
+                        ruta_texto,
+                        pid_ejecucion_activa=(
+                            pid_ejecucion_activa
+                        ),
                     )
                 )
 
@@ -865,6 +1133,8 @@ class VentanaPrincipal(ctk.CTk):
         self,
         resultado: ResumenSincronizacionExcel,
     ) -> None:
+        self._ultimo_estado_sync = resultado
+
         color = _color_estado_sincronizacion(
             resultado.estado
         )
@@ -878,14 +1148,262 @@ class VentanaPrincipal(ctk.CTk):
             text_color=color,
         )
 
+        puede_sincronizar = (
+            _puede_sincronizar_manualmente(
+                resultado,
+                ejecutando=self._ejecutando,
+                sincronizando=(
+                    self._sincronizacion_en_progreso
+                ),
+            )
+        )
+
+        self.boton_sincronizar_excel.configure(
+            state=(
+                "normal"
+                if puede_sincronizar
+                else "disabled"
+            )
+        )
+
+        puede_ver = (
+            _puede_ver_incidencias(
+                resultado,
+                ejecutando=self._ejecutando,
+            )
+        )
+
+        self.boton_ver_incidencias.configure(
+            state=(
+                "normal"
+                if puede_ver
+                else "disabled"
+            )
+        )
+
+    def _mostrar_panel_incidencias(
+        self,
+    ) -> None:
+        """
+        Muestra información operacional del journal sin modificar
+        el Excel ni ejecutar ninguna acción en CBN.
+        """
+        if self._ejecutando:
+            return
+
+        resultado = self._ultimo_estado_sync
+
+        if (
+            resultado is None
+            or not resultado.incidencias
+        ):
+            messagebox.showinfo(
+                "Incidencias Excel",
+                (
+                    "No existen incidencias registradas "
+                    "para el archivo seleccionado."
+                ),
+            )
+            return
+
+        ventana = ctk.CTkToplevel(
+            self
+        )
+
+        ventana.title(
+            "Incidencias de sincronización Excel"
+        )
+
+        ventana.geometry(
+            "760x520"
+        )
+
+        ventana.minsize(
+            650,
+            420,
+        )
+
+        ventana.transient(
+            self
+        )
+
+        ventana.grid_columnconfigure(
+            0,
+            weight=1,
+        )
+
+        ventana.grid_rowconfigure(
+            2,
+            weight=1,
+        )
+
+        ctk.CTkLabel(
+            ventana,
+            text="Incidencias de sincronización",
+            font=ctk.CTkFont(
+                size=20,
+                weight="bold",
+            ),
+            anchor="w",
+        ).grid(
+            row=0,
+            column=0,
+            padx=20,
+            pady=(20, 4),
+            sticky="ew",
+        )
+
+        ctk.CTkLabel(
+            ventana,
+            text=(
+                "Estas incidencias protegen órdenes que no "
+                "deben reprocesarse automáticamente."
+            ),
+            anchor="w",
+            text_color=(
+                "gray35",
+                "gray70",
+            ),
+        ).grid(
+            row=1,
+            column=0,
+            padx=20,
+            pady=(0, 12),
+            sticky="ew",
+        )
+
+        texto = ctk.CTkTextbox(
+            ventana,
+            wrap="word",
+        )
+
+        texto.grid(
+            row=2,
+            column=0,
+            padx=20,
+            pady=(0, 14),
+            sticky="nsew",
+        )
+
+        texto.insert(
+            "1.0",
+            _formatear_incidencias_gui(
+                resultado
+            ),
+        )
+
+        texto.configure(
+            state="disabled"
+        )
+
+        ctk.CTkButton(
+            ventana,
+            text="Cerrar",
+            width=100,
+            command=ventana.destroy,
+        ).grid(
+            row=3,
+            column=0,
+            padx=20,
+            pady=(0, 20),
+            sticky="e",
+        )
+
+        ventana.grab_set()
+
+    def _sincronizar_excel_manual(
+        self,
+    ) -> None:
+        """
+        Reintenta únicamente journal -> Excel.
+
+        No abre navegador y no vuelve a ejecutar CBN.
+        """
+        if self._ejecutando:
+            return
+
+        if self._sincronizacion_en_progreso:
+            return
+
+        ruta = self._obtener_excel()
+
+        if ruta is None:
+            return
+
+        estado = self._ultimo_estado_sync
+
+        if (
+            estado is None
+            or estado.pendientes <= 0
+        ):
+            messagebox.showinfo(
+                "Sincronización Excel",
+                (
+                    "No existen resultados pendientes "
+                    "de sincronizar."
+                ),
+            )
+            return
+
+        if not estado.puede_escribir:
+            messagebox.showwarning(
+                "Excel no disponible",
+                (
+                    "El archivo Excel no está disponible "
+                    "para escritura.\n\n"
+                    "Cierre Excel o espere a que OneDrive "
+                    "libere el archivo y vuelva a intentarlo."
+                ),
+            )
+            return
+
+        self._sincronizacion_en_progreso = True
+
+        self.boton_sincronizar_excel.configure(
+            state="disabled"
+        )
+
+        self.etiqueta_estado.configure(
+            text=(
+                "Sincronizando resultados pendientes "
+                "con el archivo Excel..."
+            )
+        )
+
+        def trabajo() -> None:
+            try:
+                resultado = (
+                    sincronizar_actualizaciones_pendientes(
+                        ruta
+                    )
+                )
+
+                self._cola.put(
+                    {
+                        "type": "manual_sync_finished",
+                        "result": resultado,
+                    }
+                )
+
+            except Exception as error:
+                self._cola.put(
+                    {
+                        "type": "manual_sync_error",
+                        "message": str(error),
+                    }
+                )
+
+        Thread(
+            target=trabajo,
+            daemon=True,
+        ).start()
+
     def _manejar_click_tabla(
         self,
         evento,
     ) -> None:
         """
-        Convierte la celda Acción en una acción clickeable.
-
-        La columna #7 corresponde a "accion".
+        Ejecuta la accion mostrada en la columna Accion.
         """
         if self._ejecutando:
             return
@@ -932,9 +1450,6 @@ class VentanaPrincipal(ctk.CTk):
             or ""
         ).strip()
 
-        if accion != "Reintentar":
-            return
-
         id_orden = str(
             valores[0]
             or ""
@@ -951,17 +1466,245 @@ class VentanaPrincipal(ctk.CTk):
             iid
         )
 
-        self._preparar_reintento_orden(
-            id_orden,
-            etapa=str(
-                valores[4]
+        if accion == "Reintentar":
+            self._preparar_reintento_orden(
+                id_orden,
+                etapa=str(
+                    valores[4]
+                    or ""
+                ),
+                detalle=str(
+                    valores[5]
+                    or ""
+                ),
+            )
+
+            return
+
+        if accion == "Reabrir":
+            self._cambiar_estado_manual(
+                [
+                    id_orden
+                ],
+                accion="reabrir",
+            )
+
+    def _ids_seleccionados_por_estado(
+        self,
+        estado_objetivo: str,
+    ) -> list[str]:
+        objetivo = str(
+            estado_objetivo
+            or ""
+        ).strip().casefold()
+
+        ids: list[str] = []
+
+        for iid in self.tabla.selection():
+            valores = self.tabla.item(
+                iid,
+                "values",
+            )
+
+            if (
+                not valores
+                or len(valores) < 4
+            ):
+                continue
+
+            estado = str(
+                valores[3]
                 or ""
-            ),
-            detalle=str(
-                valores[5]
+            ).strip().casefold()
+
+            if estado != objetivo:
+                continue
+
+            id_orden = str(
+                valores[0]
                 or ""
-            ),
+            ).strip()
+
+            if (
+                id_orden
+                and id_orden not in ids
+            ):
+                ids.append(
+                    id_orden
+                )
+
+        return ids
+
+    def _ignorar_seleccionadas(
+        self,
+    ) -> None:
+        ids = self._ids_seleccionados_por_estado(
+            "Error"
         )
+
+        if not ids:
+            messagebox.showwarning(
+                "Sin errores seleccionados",
+                (
+                    "Seleccione una o más órdenes "
+                    "con estado Error."
+                ),
+            )
+            return
+
+        self._cambiar_estado_manual(
+            ids,
+            accion="ignorar",
+        )
+
+    def _reabrir_seleccionadas(
+        self,
+    ) -> None:
+        ids = self._ids_seleccionados_por_estado(
+            "Ignorada"
+        )
+
+        if not ids:
+            messagebox.showwarning(
+                "Sin ignoradas seleccionadas",
+                (
+                    "Seleccione una o más órdenes "
+                    "con estado Ignorada."
+                ),
+            )
+            return
+
+        self._cambiar_estado_manual(
+            ids,
+            accion="reabrir",
+        )
+
+    def _cambiar_estado_manual(
+        self,
+        ids_orden: list[str],
+        *,
+        accion: str,
+    ) -> None:
+        if self._ejecutando:
+            messagebox.showwarning(
+                "RPA en ejecución",
+                (
+                    "Espere a que termine la ejecución "
+                    "actual antes de modificar órdenes."
+                ),
+            )
+            return
+
+        if self._reintento_en_progreso:
+            return
+
+        ruta = self._obtener_excel()
+
+        if ruta is None:
+            return
+
+        ids = [
+            str(
+                item
+                or ""
+            ).strip()
+            for item in ids_orden
+            if str(
+                item
+                or ""
+            ).strip()
+        ]
+
+        if not ids:
+            return
+
+        if accion == "ignorar":
+            titulo = "Ignorar órdenes"
+
+            descripcion = (
+                f"Se marcarán {len(ids)} orden(es) "
+                "como Ignorada.\n\n"
+                "ESTADO_RPA cambiará de 2 a 3.\n"
+                "Estas órdenes ya no se procesarán "
+                "automáticamente.\n\n"
+                "¿Desea continuar?"
+            )
+
+            operacion = ignorar_ordenes_manual
+
+        elif accion == "reabrir":
+            titulo = "Reabrir órdenes"
+
+            descripcion = (
+                f"Se reabrirán {len(ids)} orden(es).\n\n"
+                "ESTADO_RPA cambiará de 3 a 2.\n"
+                "Volverán a aparecer como errores "
+                "disponibles para reintento.\n\n"
+                "¿Desea continuar?"
+            )
+
+            operacion = reabrir_ordenes_manual
+
+        else:
+            raise ValueError(
+                f"Acción no soportada: {accion}"
+            )
+
+        confirmar = messagebox.askyesno(
+            titulo,
+            descripcion,
+        )
+
+        if not confirmar:
+            return
+
+        self._reintento_en_progreso = True
+
+        self._cambiar_controles(
+            False
+        )
+
+        self.etiqueta_estado.configure(
+            text=(
+                f"Actualizando {len(ids)} "
+                "orden(es)..."
+            )
+        )
+
+        def trabajo() -> None:
+            try:
+                resultado = operacion(
+                    ruta,
+                    ids,
+                )
+
+                self._cola.put(
+                    {
+                        "type": (
+                            "manual_state_change_ready"
+                        ),
+                        "action": accion,
+                        "ids": ids,
+                        "rows": resultado,
+                    }
+                )
+
+            except Exception as error:
+                self._cola.put(
+                    {
+                        "type": (
+                            "manual_state_change_error"
+                        ),
+                        "action": accion,
+                        "ids": ids,
+                        "message": str(error),
+                    }
+                )
+
+        Thread(
+            target=trabajo,
+            daemon=True,
+        ).start()
 
     def _preparar_reintento_orden(
         self,
@@ -1283,6 +2026,113 @@ class VentanaPrincipal(ctk.CTk):
             self._consulta_sync_activa = False
             return
 
+        if tipo == "manual_sync_finished":
+            self._sincronizacion_en_progreso = False
+
+            resultado = dict(
+                evento.get(
+                    "result",
+                    {},
+                )
+                or {}
+            )
+
+            aplicadas = int(
+                resultado.get(
+                    "aplicadas",
+                    0,
+                )
+                or 0
+            )
+
+            restantes = int(
+                resultado.get(
+                    "restantes",
+                    0,
+                )
+                or 0
+            )
+
+            aisladas = int(
+                resultado.get(
+                    "aisladas",
+                    0,
+                )
+                or 0
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            if (
+                restantes == 0
+                and aisladas == 0
+            ):
+                self.etiqueta_estado.configure(
+                    text=(
+                        "Sincronización Excel completada."
+                    )
+                )
+
+                messagebox.showinfo(
+                    "Sincronización Excel",
+                    (
+                        "La sincronización terminó "
+                        "correctamente.\n\n"
+                        f"Resultados aplicados: {aplicadas}."
+                    ),
+                )
+
+            else:
+                self.etiqueta_estado.configure(
+                    text=(
+                        "La sincronización Excel "
+                        "todavía requiere atención."
+                    )
+                )
+
+                messagebox.showwarning(
+                    "Sincronización incompleta",
+                    (
+                        f"Resultados aplicados: {aplicadas}\n"
+                        f"Pendientes restantes: {restantes}\n"
+                        f"Requieren revisión: {aisladas}\n\n"
+                        "No vuelva a ejecutar las órdenes "
+                        "afectadas en CBN."
+                    ),
+                )
+
+            return
+
+        if tipo == "manual_sync_error":
+            self._sincronizacion_en_progreso = False
+
+            mensaje = str(
+                evento.get(
+                    "message",
+                    "No se pudo sincronizar el Excel.",
+                )
+            )
+
+            self.etiqueta_estado.configure(
+                text=(
+                    "No se pudo completar "
+                    "la sincronización Excel."
+                )
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            messagebox.showerror(
+                "Error de sincronización",
+                (
+                    "No se volvió a ejecutar ninguna "
+                    "orden en CBN.\n\n"
+                    f"Detalle: {mensaje}"
+                ),
+            )
+
+            return
+
         if tipo == "run_directory":
             self._directorio_actual = str(evento.get("path", ""))
             self.boton_carpeta.configure(state="normal")
@@ -1465,6 +2315,105 @@ class VentanaPrincipal(ctk.CTk):
 
             return
 
+        if tipo == "manual_state_change_ready":
+            self._reintento_en_progreso = False
+
+            accion = str(
+                evento.get(
+                    "action",
+                    "",
+                )
+            )
+
+            ids = [
+                str(item)
+                for item in evento.get(
+                    "ids",
+                    [],
+                )
+            ]
+
+            if accion == "ignorar":
+                for id_orden in ids:
+                    self._actualizar_fila(
+                        id_orden,
+                        "Ignorada",
+                        "Cerrada manualmente",
+                        (
+                            "ESTADO_RPA=3. "
+                            "No se procesará automáticamente."
+                        ),
+                    )
+
+                mensaje = (
+                    f"{len(ids)} orden(es) "
+                    "marcada(s) como Ignorada."
+                )
+
+            else:
+                for id_orden in ids:
+                    self._actualizar_fila(
+                        id_orden,
+                        "Error",
+                        "Disponible para reintento",
+                        (
+                            "ESTADO_RPA=2. "
+                            "La orden puede reintentarse."
+                        ),
+                    )
+
+                mensaje = (
+                    f"{len(ids)} orden(es) "
+                    "reabierta(s)."
+                )
+
+            self._cambiar_controles(
+                True
+            )
+
+            self.etiqueta_estado.configure(
+                text=mensaje
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            messagebox.showinfo(
+                "Órdenes actualizadas",
+                mensaje,
+            )
+
+            return
+
+        if tipo == "manual_state_change_error":
+            self._reintento_en_progreso = False
+
+            self._cambiar_controles(
+                True
+            )
+
+            mensaje = str(
+                evento.get(
+                    "message",
+                    "No se pudo actualizar el estado.",
+                )
+            )
+
+            self.etiqueta_estado.configure(
+                text=(
+                    "No se pudo modificar "
+                    "el estado de las órdenes."
+                )
+            )
+
+            self._consultar_estado_sincronizacion_excel()
+
+            messagebox.showerror(
+                "Cambio no permitido",
+                mensaje,
+            )
+
+            return
+
         if tipo == "progress":
             valor = float(evento.get("value", 0.0))
             self.barra_progreso.set(max(0.0, min(1.0, valor)))
@@ -1528,8 +2477,106 @@ class VentanaPrincipal(ctk.CTk):
                 moneda=orden.get("moneda", ""),
             )
 
-        ordenes_resultado = list(resultado.get("orders", []))
-        resumen = _resumen_importes(ordenes_resultado)
+        for orden_error in resultado.get(
+            "error_orders",
+            [],
+        ):
+            id_orden = str(
+                orden_error.get(
+                    "id_orden",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not id_orden:
+                continue
+
+            bloqueada = bool(
+                orden_error.get(
+                    "blocked",
+                    False,
+                )
+            )
+
+            codigo = str(
+                orden_error.get(
+                    "code",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            motivo = str(
+                orden_error.get(
+                    "reason",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if bloqueada:
+                estado_fila = "Revisión"
+                etapa_fila = (
+                    codigo
+                    or "Protección activa"
+                )
+
+            else:
+                estado_fila = "Error"
+                etapa_fila = (
+                    "Disponible para reintento"
+                )
+
+            self._actualizar_fila(
+                id_orden,
+                estado_fila,
+                etapa_fila,
+                motivo,
+            )
+
+        for orden_ignorada in resultado.get(
+            "ignored_orders",
+            [],
+        ):
+            id_orden = str(
+                orden_ignorada.get(
+                    "id_orden",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not id_orden:
+                continue
+
+            motivo = str(
+                orden_ignorada.get(
+                    "reason",
+                    (
+                        "Orden ignorada manualmente. "
+                        "ESTADO_RPA=3."
+                    ),
+                )
+            )
+
+            self._actualizar_fila(
+                id_orden,
+                "Ignorada",
+                "Cerrada manualmente",
+                motivo,
+            )
+
+        ordenes_resultado = list(
+            resultado.get(
+                "orders",
+                [],
+            )
+        )
+
+        resumen = _resumen_importes(
+            ordenes_resultado
+        )
         texto_estado = str(resultado.get("message", "Validación terminada."))
 
         if resumen:
@@ -1693,6 +2740,59 @@ class VentanaPrincipal(ctk.CTk):
         self.boton_iniciar.configure(state=estado)
         self.selector_navegador.configure(state=estado)
         self.boton_sesion.configure(state=estado)
+
+        self.boton_ignorar_seleccion.configure(
+            state=estado
+        )
+
+        self.boton_reabrir_seleccion.configure(
+            state=estado
+        )
+
+        if not habilitar:
+            self.boton_sincronizar_excel.configure(
+                state="disabled"
+            )
+
+        elif self._ultimo_estado_sync is not None:
+            puede_sincronizar = (
+                _puede_sincronizar_manualmente(
+                    self._ultimo_estado_sync,
+                    ejecutando=self._ejecutando,
+                    sincronizando=(
+                        self._sincronizacion_en_progreso
+                    ),
+                )
+            )
+
+            self.boton_sincronizar_excel.configure(
+                state=(
+                    "normal"
+                    if puede_sincronizar
+                    else "disabled"
+                )
+            )
+
+        else:
+            self.boton_sincronizar_excel.configure(
+                state="disabled"
+            )
+
+        if (
+            habilitar
+            and self._ultimo_estado_sync is not None
+            and _puede_ver_incidencias(
+                self._ultimo_estado_sync,
+                ejecutando=self._ejecutando,
+            )
+        ):
+            self.boton_ver_incidencias.configure(
+                state="normal"
+            )
+        else:
+            self.boton_ver_incidencias.configure(
+                state="disabled"
+            )
 
         if ejecutando:
             self.boton_detener.configure(state="normal")

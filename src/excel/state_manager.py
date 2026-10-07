@@ -528,6 +528,133 @@ def inspeccionar_pendientes(
         wb.close()
 
 
+def inspeccionar_ids_ordenes_fallidas(
+    ruta_excel: str | Path,
+) -> list[str]:
+    """
+    Devuelve ID_ORDEN cuyo estado persistente es 2.
+
+    Es una inspección de solo lectura:
+    - no cambia ESTADO_RPA;
+    - no guarda el workbook;
+    - no decide todavía si es seguro reintentar.
+
+    La seguridad del reintento se determina posteriormente
+    contra el journal persistente.
+    """
+    ruta_excel = Path(
+        ruta_excel
+    )
+
+    wb = load_workbook(
+        ruta_excel,
+        read_only=True,
+        data_only=True,
+    )
+
+    try:
+        if HOJA_ORDENES not in wb.sheetnames:
+            raise ValueError(
+                f"No existe la hoja '{HOJA_ORDENES}' "
+                f"en {ruta_excel}."
+            )
+
+        ws = wb[
+            HOJA_ORDENES
+        ]
+
+        headers = _headers_ws(
+            ws
+        )
+
+        if COL_ID_ORDEN not in headers:
+            raise ValueError(
+                f"No existe la columna '{COL_ID_ORDEN}' "
+                f"en la hoja '{HOJA_ORDENES}'."
+            )
+
+        col_id = headers[
+            COL_ID_ORDEN
+        ]
+
+        col_estado = headers.get(
+            COL_ESTADO_RPA
+        )
+
+        if col_estado is None:
+            return []
+
+        estados_por_id: dict[
+            str,
+            set[int | None],
+        ] = {}
+
+        orden_ids: list[str] = []
+
+        for fila in range(
+            2,
+            ws.max_row + 1,
+        ):
+            id_orden = _normalizar_id(
+                ws.cell(
+                    row=fila,
+                    column=col_id,
+                ).value
+            )
+
+            if not id_orden:
+                continue
+
+            estado = _estado_a_int(
+                ws.cell(
+                    row=fila,
+                    column=col_estado,
+                ).value
+            )
+
+            if id_orden not in estados_por_id:
+                estados_por_id[
+                    id_orden
+                ] = set()
+
+                orden_ids.append(
+                    id_orden
+                )
+
+            estados_por_id[
+                id_orden
+            ].add(
+                estado
+            )
+
+        inconsistencias = [
+            id_orden
+            for id_orden, estados
+            in estados_por_id.items()
+            if len(estados) > 1
+        ]
+
+        if inconsistencias:
+            raise ValueError(
+                "Las filas de un mismo ID_ORDEN "
+                "tienen estados inconsistentes: "
+                + ", ".join(
+                    inconsistencias
+                )
+            )
+
+        return [
+            id_orden
+            for id_orden in orden_ids
+            if estados_por_id[
+                id_orden
+            ] == {2}
+        ]
+
+    finally:
+        wb.close()
+
+
 def obtener_pendientes(ruta_excel: str | Path) -> list[PendienteRPA]:
     ruta_excel = Path(ruta_excel)
 
@@ -916,6 +1043,462 @@ def reiniciar_orden_fallida(
         filas
     )
 
+
+def inspeccionar_ids_ordenes_ignoradas(
+    ruta_excel: str | Path,
+) -> list[str]:
+    """
+    Devuelve los ID_ORDEN cuyo estado persistente es 3.
+
+    Estado 3 significa:
+    - la orden fue cerrada/ignorada manualmente;
+    - no debe procesarse como pendiente;
+    - no debe mostrarse como error activo.
+    """
+    ruta_excel = Path(
+        ruta_excel
+    )
+
+    wb = load_workbook(
+        ruta_excel,
+        read_only=True,
+        data_only=True,
+    )
+
+    try:
+        if HOJA_ORDENES not in wb.sheetnames:
+            raise ValueError(
+                f"No existe la hoja '{HOJA_ORDENES}' "
+                f"en {ruta_excel}."
+            )
+
+        ws = wb[
+            HOJA_ORDENES
+        ]
+
+        headers = _headers_ws(
+            ws
+        )
+
+        if COL_ID_ORDEN not in headers:
+            raise ValueError(
+                f"No existe la columna "
+                f"'{COL_ID_ORDEN}'."
+            )
+
+        col_estado = headers.get(
+            COL_ESTADO_RPA
+        )
+
+        if col_estado is None:
+            return []
+
+        col_id = headers[
+            COL_ID_ORDEN
+        ]
+
+        estados_por_id: dict[
+            str,
+            set[int | None],
+        ] = {}
+
+        orden_ids: list[str] = []
+
+        for fila in range(
+            2,
+            ws.max_row + 1,
+        ):
+            id_orden = _normalizar_id(
+                ws.cell(
+                    row=fila,
+                    column=col_id,
+                ).value
+            )
+
+            if not id_orden:
+                continue
+
+            estado = _estado_a_int(
+                ws.cell(
+                    row=fila,
+                    column=col_estado,
+                ).value
+            )
+
+            if id_orden not in estados_por_id:
+                estados_por_id[
+                    id_orden
+                ] = set()
+
+                orden_ids.append(
+                    id_orden
+                )
+
+            estados_por_id[
+                id_orden
+            ].add(
+                estado
+            )
+
+        inconsistencias = [
+            id_orden
+            for id_orden, estados
+            in estados_por_id.items()
+            if len(estados) > 1
+        ]
+
+        if inconsistencias:
+            raise ValueError(
+                "Las filas de un mismo ID_ORDEN "
+                "tienen estados inconsistentes: "
+                + ", ".join(
+                    inconsistencias
+                )
+            )
+
+        return [
+            id_orden
+            for id_orden in orden_ids
+            if estados_por_id[
+                id_orden
+            ] == {3}
+        ]
+
+    finally:
+        wb.close()
+
+
+def _cambiar_estado_ordenes_controlado(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+    *,
+    estado_origen: int,
+    estado_destino: int,
+) -> dict[str, int]:
+    """
+    Cambia varias órdenes en una única transacción Excel.
+
+    Solo escribe si TODAS las posiciones de TODOS los IDs
+    están en el estado de origen esperado.
+    """
+    ruta_excel = Path(
+        ruta_excel
+    )
+
+    if isinstance(
+        ids_orden,
+        (
+            str,
+            int,
+            float,
+        ),
+    ):
+        valores = [
+            ids_orden
+        ]
+
+    else:
+        try:
+            valores = list(
+                ids_orden
+            )
+        except TypeError:
+            valores = [
+                ids_orden
+            ]
+
+    ids_normalizados: list[str] = []
+
+    for valor in valores:
+        id_orden = _normalizar_id(
+            valor
+        )
+
+        if (
+            id_orden
+            and id_orden not in ids_normalizados
+        ):
+            ids_normalizados.append(
+                id_orden
+            )
+
+    if not ids_normalizados:
+        raise ValueError(
+            "Debe indicar al menos un ID_ORDEN."
+        )
+
+    objetivos = set(
+        ids_normalizados
+    )
+
+    with _excel_lock(
+        ruta_excel
+    ):
+        wb, sha256_cargado = (
+            _cargar_workbook_estable_para_actualizacion(
+                ruta_excel
+            )
+        )
+
+        try:
+            if HOJA_ORDENES not in wb.sheetnames:
+                raise ValueError(
+                    f"No existe la hoja "
+                    f"'{HOJA_ORDENES}'."
+                )
+
+            ws = wb[
+                HOJA_ORDENES
+            ]
+
+            headers = _headers_ws(
+                ws
+            )
+
+            if COL_ID_ORDEN not in headers:
+                raise ValueError(
+                    f"No existe la columna "
+                    f"'{COL_ID_ORDEN}'."
+                )
+
+            if COL_ESTADO_RPA not in headers:
+                raise ValueError(
+                    f"No existe la columna "
+                    f"'{COL_ESTADO_RPA}'."
+                )
+
+            col_id = headers[
+                COL_ID_ORDEN
+            ]
+
+            col_estado = headers[
+                COL_ESTADO_RPA
+            ]
+
+            filas_por_id: dict[
+                str,
+                list[int],
+            ] = {
+                id_orden: []
+                for id_orden
+                in ids_normalizados
+            }
+
+            estados_por_id: dict[
+                str,
+                list[
+                    tuple[
+                        int,
+                        int | None,
+                    ]
+                ],
+            ] = {
+                id_orden: []
+                for id_orden
+                in ids_normalizados
+            }
+
+            for fila in range(
+                2,
+                ws.max_row + 1,
+            ):
+                id_orden = _normalizar_id(
+                    ws.cell(
+                        row=fila,
+                        column=col_id,
+                    ).value
+                )
+
+                if id_orden not in objetivos:
+                    continue
+
+                estado = _estado_a_int(
+                    ws.cell(
+                        row=fila,
+                        column=col_estado,
+                    ).value
+                )
+
+                filas_por_id[
+                    id_orden
+                ].append(
+                    fila
+                )
+
+                estados_por_id[
+                    id_orden
+                ].append(
+                    (
+                        fila,
+                        estado,
+                    )
+                )
+
+            faltantes = [
+                id_orden
+                for id_orden
+                in ids_normalizados
+                if not filas_por_id[
+                    id_orden
+                ]
+            ]
+
+            if faltantes:
+                raise ValueError(
+                    "No se encontraron los ID_ORDEN: "
+                    + ", ".join(
+                        faltantes
+                    )
+                )
+
+            invalidos: list[str] = []
+
+            for id_orden in ids_normalizados:
+                estados = estados_por_id[
+                    id_orden
+                ]
+
+                if any(
+                    estado != estado_origen
+                    for _, estado
+                    in estados
+                ):
+                    detalle = ", ".join(
+                        f"fila {fila}={estado}"
+                        for fila, estado
+                        in estados
+                    )
+
+                    invalidos.append(
+                        f"{id_orden} ({detalle})"
+                    )
+
+            if invalidos:
+                raise ValueError(
+                    "El cambio solo está permitido "
+                    f"desde ESTADO_RPA={estado_origen}. "
+                    "Estados actuales: "
+                    + "; ".join(
+                        invalidos
+                    )
+                )
+
+            for id_orden in ids_normalizados:
+                for fila in filas_por_id[
+                    id_orden
+                ]:
+                    ws.cell(
+                        row=fila,
+                        column=col_estado,
+                    ).value = (
+                        estado_destino
+                    )
+
+            guardar_workbook_atomico(
+                wb,
+                ruta_excel,
+                sha256_esperado=(
+                    sha256_cargado
+                ),
+            )
+
+        finally:
+            wb.close()
+
+    resultado = {
+        id_orden: len(
+            filas_por_id[
+                id_orden
+            ]
+        )
+        for id_orden
+        in ids_normalizados
+    }
+
+    print(
+        f"{len(resultado)} orden(es): "
+        f"ESTADO_RPA "
+        f"{estado_origen} -> {estado_destino}."
+    )
+
+    return resultado
+
+
+def ignorar_ordenes_fallidas(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+) -> dict[str, int]:
+    """
+    Cierra manualmente órdenes fallidas:
+    ESTADO_RPA 2 -> 3.
+    """
+    return _cambiar_estado_ordenes_controlado(
+        ruta_excel,
+        ids_orden,
+        estado_origen=2,
+        estado_destino=3,
+    )
+
+
+def ignorar_orden_fallida(
+    ruta_excel: str | Path,
+    id_orden: Any,
+) -> int:
+    resultado = ignorar_ordenes_fallidas(
+        ruta_excel,
+        [
+            id_orden
+        ],
+    )
+
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    return resultado[
+        id_normalizado
+    ]
+
+
+def reabrir_ordenes_ignoradas(
+    ruta_excel: str | Path,
+    ids_orden: Any,
+) -> dict[str, int]:
+    """
+    Reabre órdenes ignoradas:
+    ESTADO_RPA 3 -> 2.
+
+    Quedan nuevamente como errores disponibles para
+    Reintentar o Ignorar.
+    """
+    return _cambiar_estado_ordenes_controlado(
+        ruta_excel,
+        ids_orden,
+        estado_origen=3,
+        estado_destino=2,
+    )
+
+
+def reabrir_orden_ignorada(
+    ruta_excel: str | Path,
+    id_orden: Any,
+) -> int:
+    resultado = reabrir_ordenes_ignoradas(
+        ruta_excel,
+        [
+            id_orden
+        ],
+    )
+
+    id_normalizado = _normalizar_id(
+        id_orden
+    )
+
+    return resultado[
+        id_normalizado
+    ]
+
+
 def actualizar_estado_orden(
     ruta_excel: str | Path,
     id_orden_buscado: Any,
@@ -924,8 +1507,8 @@ def actualizar_estado_orden(
     """
     Actualiza ESTADO_RPA en todas las filas/posiciones del ID_ORDEN.
     """
-    if estado_rpa not in (0, 1, 2):
-        raise ValueError("estado_rpa solo puede ser 0, 1 o 2.")
+    if estado_rpa not in (0, 1, 2, 3):
+        raise ValueError("estado_rpa solo puede ser 0, 1, 2 o 3.")
 
     ruta_excel = Path(ruta_excel)
     id_orden_buscado = _normalizar_id(id_orden_buscado)
